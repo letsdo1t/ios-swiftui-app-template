@@ -1,37 +1,109 @@
 import SwiftUI
+import PhotosUI
 
-/// Minimal starter screen — replace with your app. It exists so the template
-/// builds, runs, and ships an IPA out of the box.
 struct ContentView: View {
-  @State private var taps = 0
+    @State private var selectedVideo: PhotosPickerItem?
+    @State private var videoName = "Belum pilih video"
+    @State private var platform = "Instagram"
+    @State private var resolution = "1080p"
+    @State private var fps = "60 FPS"
 
-  var body: some View {
-    NavigationStack {
-      VStack(spacing: 24) {
-        Image(systemName: "swift")
-          .font(.system(size: 72))
-          .foregroundStyle(.tint)
-          .symbolEffect(.bounce, value: taps)
+    let platforms = ["Instagram", "TikTok", "WhatsApp", "Facebook"]
+    let resolutions = ["720p", "1080p", "4K"]
+    let frameRates = ["30 FPS", "60 FPS"]
 
-        Text("Hello, iOS 👋")
-          .font(.largeTitle.bold())
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 24) {
+                    Image(systemName: "video.badge.waveform")
+                        .font(.system(size: 65))
+                        .foregroundStyle(.cyan)
 
-        Text("You tapped \(taps) time\(taps == 1 ? "" : "s").")
-          .foregroundStyle(.secondary)
-          .contentTransition(.numericText())
+                    Text("CLEAR VIDEO")
+                        .font(.system(size: 30, weight: .bold))
 
-        Button("Tap me") {
-          withAnimation(.snappy) { taps += 1 }
+                    Text("Video Enhancer for iOS")
+                        .foregroundStyle(.secondary)
+
+                    PhotosPicker(
+                        selection: $selectedVideo,
+                        matching: .videos
+                    ) {
+                        Label("Import Video", systemImage: "plus.circle.fill")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(.cyan)
+                            .foregroundStyle(.black)
+                            .clipShape(RoundedRectangle(cornerRadius: 14))
+                    }
+
+                    Text(videoName)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text("Platform")
+                            .font(.headline)
+
+                        Picker("Platform", selection: $platform) {
+                            ForEach(platforms, id: \.self) { item in
+                                Text(item)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+
+                        Text("Resolution")
+                            .font(.headline)
+
+                        Picker("Resolution", selection: $resolution) {
+                            ForEach(resolutions, id: \.self) { item in
+                                Text(item)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+
+                        Text("Frame Rate")
+                            .font(.headline)
+
+                        Picker("FPS", selection: $fps) {
+                            ForEach(frameRates, id: \.self) { item in
+                                Text(item)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                    }
+                    .padding()
+                    .background(.white.opacity(0.07))
+                    .clipShape(RoundedRectangle(cornerRadius: 18))
+
+                    Button(action: {}) {
+                        Label("Enhance & Export", systemImage: "sparkles")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(.blue)
+                            .foregroundStyle(.white)
+                            .clipShape(RoundedRectangle(cornerRadius: 14))
+                    }
+                    .disabled(selectedVideo == nil)
+
+                    Text("High Quality • Smooth • Clean")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding()
+            }
+            .background(Color.black)
+            .foregroundStyle(.white)
+            .navigationTitle("Clear Video")
+            .navigationBarTitleDisplayMode(.inline)
         }
-        .buttonStyle(.borderedProminent)
-        .controlSize(.large)
-      }
-      .padding()
-      .navigationTitle("AppName")
+        .preferredColorScheme(.dark)
     }
-  }
 }
 
 #Preview {
-  ContentView()
+    ContentView()
 }
