@@ -84,7 +84,9 @@ struct ContentView: View {
                     .background(.white.opacity(0.07))
                     .clipShape(RoundedRectangle(cornerRadius: 18))
 
-                    Button(action: {}) {
+                    Button(action: {
+    videoName = "Sedang menyediakan video..."
+}) {
                         Label("Enhance & Export", systemImage: "sparkles")
                             .font(.headline)
                             .frame(maxWidth: .infinity)
