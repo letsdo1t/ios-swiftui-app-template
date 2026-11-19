@@ -37,7 +37,13 @@ struct ContentView: View {
                             .background(.cyan)
                             .foregroundStyle(.black)
                             .clipShape(RoundedRectangle(cornerRadius: 14))
-                    }
+                    }.onChange(of: selectedVideo) { _, newVideo in
+    if newVideo != nil {
+        videoName = "Video berjaya dipilih ✅"
+    } else {
+        videoName = "Belum pilih video"
+    }
+}
 
                     Text(videoName)
                         .font(.caption)
