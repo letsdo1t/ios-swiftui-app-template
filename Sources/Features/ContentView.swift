@@ -517,7 +517,7 @@ struct ContentView: View {
         }
     }
 
-    private func resolvedPreset(for asset: AVAsset) async -> String {
+    private func resolvedPreset(for asset: AVAsset) -> String {
         let desired: String
         switch resolution {
         case "720p": desired = AVAssetExportPreset1280x720
@@ -525,7 +525,7 @@ struct ContentView: View {
         default: desired = AVAssetExportPreset3840x2160
         }
 
-        let compatible = await AVAssetExportSession.exportPresets(compatibleWith: asset)
+        let compatible = AVAssetExportSession.exportPresets(compatibleWith: asset)
         if compatible.contains(desired) {
             return desired
         }
@@ -552,7 +552,7 @@ struct ContentView: View {
 
         do {
             let asset = AVURLAsset(url: videoURL)
-            let preset = await resolvedPreset(for: asset)
+            let preset = resolvedPreset(for: asset)
 
             guard let session = AVAssetExportSession(
                 asset: asset,
@@ -567,7 +567,12 @@ struct ContentView: View {
                 )
             }
 
-            let composition = try await AVMutableVideoComposition.videoComposition(with: asset)
+            let composition = AVMutableVideoComposition(
+                asset: asset,
+                applyingCIFiltersWithHandler: { request in
+                    request.finish(with: request.sourceImage, context: nil)
+                }
+            )
             let targetFPS: Int32 = fps == "60 FPS" ? 60 : 30
             composition.frameDuration = CMTime(value: 1, timescale: targetFPS)
             session.videoComposition = composition
