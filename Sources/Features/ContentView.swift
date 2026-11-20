@@ -4,6 +4,7 @@ import AVFoundation
 import UniformTypeIdentifiers
 
 struct ContentView: View {
+    @State private var isLightMode = false
     @State private var selectedVideo: PhotosPickerItem?
     @State private var videoURL: URL?
     @State private var exportedVideoURL: URL?
@@ -14,15 +15,30 @@ struct ContentView: View {
     @State private var resolution = "1080p"
     @State private var fps = "60 FPS"
 
-    // Palet Frosted Glass
-    private let bgTop = Color(red: 0.08, green: 0.14, blue: 0.24)
-    private let bgMid = Color(red: 0.05, green: 0.08, blue: 0.15)
-    private let bgBottom = Color(red: 0.04, green: 0.05, blue: 0.09)
-    private let glassBorder = Color.white.opacity(0.14)
+    // Palet Frosted Glass — Dark Mode
+    private let darkBgTop = Color(red: 0.08, green: 0.14, blue: 0.24)
+    private let darkBgMid = Color(red: 0.05, green: 0.08, blue: 0.15)
+    private let darkBgBottom = Color(red: 0.04, green: 0.05, blue: 0.09)
+    private let darkMuted = Color(red: 0.58, green: 0.65, blue: 0.74)
+
+    // Palet Frosted Glass — Light Mode
+    private let lightBgTop = Color(red: 0.90, green: 0.95, blue: 0.99)
+    private let lightBgMid = Color(red: 0.95, green: 0.97, blue: 1.00)
+    private let lightBgBottom = Color(red: 0.92, green: 0.94, blue: 0.98)
+    private let lightPrimary = Color(red: 0.07, green: 0.11, blue: 0.18)
+    private let lightMuted = Color(red: 0.38, green: 0.45, blue: 0.56)
+
+    // Aksen Glass
     private let cyanAccent = Color(red: 0.22, green: 0.74, blue: 0.97)
     private let cyanBright = Color(red: 0.49, green: 0.83, blue: 0.99)
+    private let cyanDeep = Color(red: 0.06, green: 0.48, blue: 0.76)
     private let indigoAccent = Color(red: 0.51, green: 0.55, blue: 0.97)
-    private let mutedText = Color(red: 0.58, green: 0.65, blue: 0.74)
+
+    private var primaryText: Color { isLightMode ? lightPrimary : .white }
+    private var mutedText: Color { isLightMode ? lightMuted : darkMuted }
+    private var activeAccent: Color { isLightMode ? cyanDeep : cyanBright }
+    private var glassBorder: Color { isLightMode ? Color.black.opacity(0.09) : Color.white.opacity(0.14) }
+    private var segmentWell: Color { isLightMode ? Color.white.opacity(0.55) : Color.black.opacity(0.28) }
 
     private let platforms = ["Instagram", "TikTok", "WhatsApp", "Facebook"]
     private let resolutions = ["720p", "1080p", "4K"]
@@ -51,7 +67,7 @@ struct ContentView: View {
                     ShareLink(item: exportedVideoURL, preview: SharePreview("Naise+ Video")) {
                         Label("Share / Save Video", systemImage: "square.and.arrow.up")
                             .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(cyanBright)
+                            .foregroundStyle(activeAccent)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 12)
                             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -79,19 +95,21 @@ struct ContentView: View {
             .background(
                 ZStack {
                     LinearGradient(
-                        colors: [bgTop, bgMid, bgBottom],
+                        colors: isLightMode
+                            ? [lightBgTop, lightBgMid, lightBgBottom]
+                            : [darkBgTop, darkBgMid, darkBgBottom],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     )
 
                     Circle()
-                        .fill(cyanAccent.opacity(0.16))
+                        .fill(cyanAccent.opacity(isLightMode ? 0.22 : 0.16))
                         .frame(width: 280, height: 280)
                         .blur(radius: 70)
                         .offset(x: -110, y: -260)
 
                     Circle()
-                        .fill(indigoAccent.opacity(0.14))
+                        .fill(indigoAccent.opacity(isLightMode ? 0.16 : 0.14))
                         .frame(width: 260, height: 260)
                         .blur(radius: 75)
                         .offset(x: 130, y: 180)
@@ -99,11 +117,11 @@ struct ContentView: View {
                 .ignoresSafeArea()
             )
         }
-        .foregroundStyle(.white)
-        .preferredColorScheme(.dark)
+        .foregroundStyle(primaryText)
+        .preferredColorScheme(isLightMode ? .light : .dark)
     }
 
-    // MARK: - Header
+    // MARK: - Header + Light / Dark Switch
     private var header: some View {
         HStack {
             VStack(alignment: .leading, spacing: 3) {
@@ -117,16 +135,36 @@ struct ContentView: View {
 
             Spacer()
 
-            Image(systemName: "video.fill")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(cyanBright)
-                .frame(width: 44, height: 44)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 13, style: .continuous)
-                        .stroke(glassBorder, lineWidth: 1)
+            HStack(spacing: 4) {
+                modeButton(icon: "moon.fill", lightTarget: false)
+                modeButton(icon: "sun.max.fill", lightTarget: true)
+            }
+            .padding(4)
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay(
+                Capsule()
+                    .stroke(glassBorder, lineWidth: 1)
+            )
+        }
+    }
+
+    private func modeButton(icon: String, lightTarget: Bool) -> some View {
+        let isSelected = isLightMode == lightTarget
+        return Button {
+            withAnimation(.snappy(duration: 0.22)) {
+                isLightMode = lightTarget
+            }
+        } label: {
+            Image(systemName: icon)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(isSelected ? activeAccent : mutedText)
+                .frame(width: 34, height: 34)
+                .background(
+                    isSelected ? cyanAccent.opacity(0.2) : Color.clear,
+                    in: Circle()
                 )
         }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Import Area
@@ -135,7 +173,7 @@ struct ContentView: View {
             VStack(spacing: 10) {
                 Image(systemName: videoURL == nil ? "plus" : "checkmark")
                     .font(.system(size: 22, weight: .semibold))
-                    .foregroundStyle(cyanBright)
+                    .foregroundStyle(activeAccent)
                     .frame(width: 46, height: 46)
                     .background(cyanAccent.opacity(0.18), in: Circle())
 
@@ -154,7 +192,9 @@ struct ContentView: View {
             .overlay(
                 RoundedRectangle(cornerRadius: 22, style: .continuous)
                     .stroke(
-                        videoURL == nil ? Color.white.opacity(0.24) : cyanAccent.opacity(0.75),
+                        videoURL == nil
+                            ? (isLightMode ? Color.black.opacity(0.14) : Color.white.opacity(0.24))
+                            : cyanAccent.opacity(0.75),
                         style: StrokeStyle(
                             lineWidth: 1.4,
                             dash: videoURL == nil ? [6, 5] : []
@@ -173,12 +213,12 @@ struct ContentView: View {
     private var status: some View {
         HStack(spacing: 7) {
             Circle()
-                .fill(videoURL == nil ? mutedText : cyanBright)
+                .fill(videoURL == nil ? mutedText : activeAccent)
                 .frame(width: 7, height: 7)
 
             Text(videoName)
                 .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(videoURL == nil ? mutedText : cyanBright)
+                .foregroundStyle(videoURL == nil ? mutedText : activeAccent)
                 .lineLimit(1)
         }
         .frame(maxWidth: .infinity)
@@ -191,6 +231,7 @@ struct ContentView: View {
 
             HStack(spacing: 6) {
                 ForEach(platforms, id: \.self) { name in
+                    let isSelected = platform == name
                     Button {
                         withAnimation(.snappy(duration: 0.2)) {
                             platform = name
@@ -199,19 +240,15 @@ struct ContentView: View {
                         SocialPlatformLogo(platform: name)
                             .frame(maxWidth: .infinity)
                             .frame(height: 38)
-                            .foregroundStyle(platform == name ? cyanBright : mutedText)
+                            .foregroundStyle(isSelected ? activeAccent : mutedText)
                             .background(
-                                platform == name
-                                    ? cyanAccent.opacity(0.2)
-                                    : Color.clear
+                                isSelected ? cyanAccent.opacity(0.2) : Color.clear
                             )
                             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                             .overlay(
                                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                                     .stroke(
-                                        platform == name
-                                            ? cyanAccent.opacity(0.65)
-                                            : Color.clear,
+                                        isSelected ? cyanAccent.opacity(0.65) : Color.clear,
                                         lineWidth: 1
                                     )
                             )
@@ -222,16 +259,16 @@ struct ContentView: View {
             }
             .padding(4)
             .background(
-                Color.black.opacity(0.28),
+                segmentWell,
                 in: RoundedRectangle(cornerRadius: 14, style: .continuous)
             )
 
-            Divider().overlay(Color.white.opacity(0.1))
+            Divider().overlay(glassBorder)
 
             sectionHeading("RESOLUTION", detail: resolutionDetail)
             choiceRow(resolutions, selection: $resolution)
 
-            Divider().overlay(Color.white.opacity(0.1))
+            Divider().overlay(glassBorder)
 
             sectionHeading(
                 "FRAME RATE",
@@ -270,7 +307,7 @@ struct ContentView: View {
 
             Text(detail)
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(highlight ? cyanBright : mutedText)
+                .foregroundStyle(highlight ? activeAccent : mutedText)
         }
     }
 
@@ -280,29 +317,25 @@ struct ContentView: View {
     ) -> some View {
         HStack(spacing: 5) {
             ForEach(options, id: \.self) { option in
+                let isSelected = selection.wrappedValue == option
                 Button {
                     withAnimation(.snappy(duration: 0.2)) {
                         selection.wrappedValue = option
                     }
                 } label: {
-                    let isSelected = selection.wrappedValue == option
                     Text(option)
                         .font(.system(size: 13, weight: .semibold))
                         .frame(maxWidth: .infinity)
                         .frame(height: 38)
-                        .foregroundStyle(isSelected ? cyanBright : mutedText)
+                        .foregroundStyle(isSelected ? activeAccent : mutedText)
                         .background(
-                            isSelected
-                                ? cyanAccent.opacity(0.2)
-                                : Color.clear
+                            isSelected ? cyanAccent.opacity(0.2) : Color.clear
                         )
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                         .overlay(
                             RoundedRectangle(cornerRadius: 10, style: .continuous)
                                 .stroke(
-                                    isSelected
-                                        ? cyanAccent.opacity(0.65)
-                                        : Color.clear,
+                                    isSelected ? cyanAccent.opacity(0.65) : Color.clear,
                                     lineWidth: 1
                                 )
                         )
@@ -312,7 +345,7 @@ struct ContentView: View {
         }
         .padding(4)
         .background(
-            Color.black.opacity(0.28),
+            segmentWell,
             in: RoundedRectangle(cornerRadius: 14, style: .continuous)
         )
     }
