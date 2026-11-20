@@ -1,7 +1,6 @@
 import SwiftUI
 import PhotosUI
 import AVFoundation
-
 struct ContentView: View {
     @State private var selectedVideo: PhotosPickerItem?
     @State private var videoURL: URL?
@@ -139,7 +138,7 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
     }
 }
-extension ContentView {
+extension ContentView {.
     func exportVideo() {
         guard let videoURL else {
             videoName = "Sila pilih video dahulu"
