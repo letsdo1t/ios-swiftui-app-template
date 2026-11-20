@@ -1,6 +1,8 @@
 import SwiftUI
 import PhotosUI
 import AVFoundation
+import UniformTypeIdentifiers
+
 struct ContentView: View {
     @State private var selectedVideo: PhotosPickerItem?
     @State private var videoURL: URL?
@@ -8,7 +10,7 @@ struct ContentView: View {
     @State private var exportedVideoURL: URL?
     @State private var exportError: String?
     @State private var videoName = "Belum pilih video"
-    @State private var platform = "Instagram"
+    @State private var platform = "WhatsApp"
     @State private var resolution = "1080p"
     @State private var fps = "60 FPS"
 
@@ -41,36 +43,41 @@ struct ContentView: View {
                             .background(.cyan)
                             .foregroundStyle(.black)
                             .clipShape(RoundedRectangle(cornerRadius: 14))
+                    }
                     .onChange(of: selectedVideo) { _, newVideo in
-    guard let newVideo else {
-        videoURL = nil
-        videoName = "Belum pilih video"
-        return
-    }
+                        guard let newVideo else {
+                            videoURL = nil
+                            videoName = "Belum pilih video"
+                            return
+                        }
 
-    Task {
-        videoName = "Sedang membaca video..."
+                        videoURL = nil
+                        exportedVideoURL = nil
+                        videoName = "Sedang membaca video..."
 
-        do {
-            guard let data = try await newVideo.loadTransferable(type: Data.self) else {
-                videoName = "Gagal membaca video"
-                return
-            }
+                        Task {
+                            do {
+                                guard let data = try await newVideo.loadTransferable(
+                                    type: Data.self
+                                ) else {
+                                    videoName = "Gagal membaca video"
+                                    return
+                                }
 
-            let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent(UUID().uuidString)
-                .appendingPathExtension("mov")
+                                let url = FileManager.default.temporaryDirectory
+                                    .appendingPathComponent(UUID().uuidString)
+                                    .appendingPathExtension("mov")
 
-            try data.write(to: url)
+                                try data.write(to: url)
 
-            videoURL = url
-            videoName = "Video berjaya dimuatkan ✅"
-        } catch {
-            videoURL = nil
-            videoName = "Ralat membaca video: \(error.localizedDescription)"
-        }
-    }
-}
+                                videoURL = url
+                                videoName = "Video berjaya dimuatkan"
+                            } catch {
+                                videoURL = nil
+                                videoName = "Ralat: \(error.localizedDescription)"
+                            }
+                        }
+                    }
 
                     Text(videoName)
                         .font(.caption)
@@ -111,18 +118,49 @@ struct ContentView: View {
                     .background(.white.opacity(0.07))
                     .clipShape(RoundedRectangle(cornerRadius: 18))
 
-                    Button(action: {
-    exportVideo()
-}) {
-                        Label("Enhance & Export", systemImage: "sparkles")
-                            .font(.headline)
-                            .frame(maxWidth: .infinity)
-                            .padding()
-                            .background(.blue)
-                            .foregroundStyle(.white)
-                            .clipShape(RoundedRectangle(cornerRadius: 14))
+                    Button {
+                        exportVideo()
+                    } label: {
+                        HStack {
+                            if isProcessing {
+                                ProgressView()
+                                    .tint(.white)
+                            }
+
+                            Label(
+                                isProcessing ? "Processing..." : "Enhance & Export",
+                                systemImage: "sparkles"
+                            )
+                        }
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(.blue)
+                        .foregroundStyle(.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
                     }
-                    .disabled(selectedVideo == nil)
+                    .disabled(videoURL == nil || isProcessing)
+
+                    if let exportedVideoURL {
+                        ShareLink(
+                            item: exportedVideoURL,
+                            preview: SharePreview("Clear Video")
+                        ) {
+                            Label("Share / Save Video", systemImage: "square.and.arrow.up")
+                                .font(.headline)
+                                .frame(maxWidth: .infinity)
+                                .padding()
+                                .background(.green)
+                                .foregroundStyle(.white)
+                                .clipShape(RoundedRectangle(cornerRadius: 14))
+                        }
+                    }
+
+                    if let exportError {
+                        Text(exportError)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
 
                     Text("High Quality • Smooth • Clean")
                         .font(.caption)
@@ -137,8 +175,7 @@ struct ContentView: View {
         }
         .preferredColorScheme(.dark)
     }
-}
-extension ContentView {.
+
     func exportVideo() {
         guard let videoURL else {
             videoName = "Sila pilih video dahulu"
@@ -159,7 +196,7 @@ extension ContentView {.
                     presetName: AVAssetExportPresetHighestQuality
                 ) else {
                     throw NSError(
-                        domain: "NaisePlus",
+                        domain: "ClearVideo",
                         code: 1,
                         userInfo: [
                             NSLocalizedDescriptionKey:
@@ -168,8 +205,7 @@ extension ContentView {.
                     )
                 }
 
-                let outputURL = FileManager.default
-                    .temporaryDirectory
+                let outputURL = FileManager.default.temporaryDirectory
                     .appendingPathComponent(UUID().uuidString)
                     .appendingPathExtension("mp4")
 
@@ -179,7 +215,7 @@ extension ContentView {.
                 )
 
                 exportedVideoURL = outputURL
-                videoName = "Video berjaya dieksport ✅"
+                videoName = "Video berjaya dieksport"
 
             } catch {
                 exportError = error.localizedDescription
@@ -190,6 +226,7 @@ extension ContentView {.
         }
     }
 }
+
 #Preview {
     ContentView()
 }
