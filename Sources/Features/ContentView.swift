@@ -18,7 +18,6 @@ struct ContentView: View {
     private let bgTop = Color(red: 0.08, green: 0.14, blue: 0.24)
     private let bgMid = Color(red: 0.05, green: 0.08, blue: 0.15)
     private let bgBottom = Color(red: 0.04, green: 0.05, blue: 0.09)
-    private let glassSurface = Color.white.opacity(0.07)
     private let glassBorder = Color.white.opacity(0.14)
     private let cyanAccent = Color(red: 0.22, green: 0.74, blue: 0.97)
     private let cyanBright = Color(red: 0.49, green: 0.83, blue: 0.99)
@@ -31,55 +30,52 @@ struct ContentView: View {
 
     var body: some View {
         GeometryReader { geometry in
-            ScrollView {
-                VStack(spacing: 0) {
-                    header
-                        .padding(.top, 24)
+            VStack(spacing: 0) {
+                header
+                    .padding(.top, 12)
 
-                    importArea
-                        .padding(.top, 32)
+                importArea
+                    .padding(.top, 18)
 
-                    status
-                        .padding(.top, 16)
+                status
+                    .padding(.top, 10)
 
-                    settingsPanel
-                        .padding(.top, 30)
+                settingsPanel
+                    .padding(.top, 16)
 
-                    exportButton
-                        .padding(.top, 34)
+                Spacer(minLength: 12)
 
-                    if let exportedVideoURL {
-                        ShareLink(item: exportedVideoURL, preview: SharePreview("Naise+ Video")) {
-                            Label("Share / Save Video", systemImage: "square.and.arrow.up")
-                                .font(.system(size: 16, weight: .semibold))
-                                .foregroundStyle(cyanBright)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 16)
-                                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                        .stroke(cyanAccent.opacity(0.45), lineWidth: 1)
-                                )
-                        }
-                        .padding(.top, 14)
+                exportButton
+
+                if let exportedVideoURL {
+                    ShareLink(item: exportedVideoURL, preview: SharePreview("Naise+ Video")) {
+                        Label("Share / Save Video", systemImage: "square.and.arrow.up")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(cyanBright)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .stroke(cyanAccent.opacity(0.45), lineWidth: 1)
+                            )
                     }
-
-                    if let exportError {
-                        Text(exportError)
-                            .font(.footnote)
-                            .foregroundStyle(.red)
-                            .multilineTextAlignment(.center)
-                            .padding(.top, 12)
-                    }
-
-                    Spacer(minLength: 32)
+                    .padding(.top, 10)
                 }
-                .padding(.horizontal, 22)
-                .frame(maxWidth: 500)
-                .frame(maxWidth: .infinity)
-                .frame(minHeight: geometry.size.height, alignment: .top)
+
+                if let exportError {
+                    Text(exportError)
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                        .padding(.top, 6)
+                }
             }
-            .scrollIndicators(.hidden)
+            .padding(.horizontal, 20)
+            .padding(.bottom, 12)
+            .frame(maxWidth: 500)
+            .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
             .background(
                 ZStack {
                     LinearGradient(
@@ -110,24 +106,24 @@ struct ContentView: View {
     // MARK: - Header
     private var header: some View {
         HStack {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text("Naise+")
-                    .font(.system(size: 30, weight: .bold, design: .rounded))
+                    .font(.system(size: 28, weight: .bold, design: .rounded))
 
                 Text("AI Video Enhancer")
-                    .font(.system(size: 14))
+                    .font(.system(size: 13))
                     .foregroundStyle(mutedText)
             }
 
             Spacer()
 
             Image(systemName: "video.fill")
-                .font(.system(size: 19, weight: .semibold))
+                .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(cyanBright)
-                .frame(width: 48, height: 48)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .frame(width: 44, height: 44)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
                         .stroke(glassBorder, lineWidth: 1)
                 )
         }
@@ -136,27 +132,27 @@ struct ContentView: View {
     // MARK: - Import Area
     private var importArea: some View {
         PhotosPicker(selection: $selectedVideo, matching: .videos) {
-            VStack(spacing: 14) {
+            VStack(spacing: 10) {
                 Image(systemName: videoURL == nil ? "plus" : "checkmark")
-                    .font(.system(size: 24, weight: .semibold))
+                    .font(.system(size: 22, weight: .semibold))
                     .foregroundStyle(cyanBright)
-                    .frame(width: 52, height: 52)
+                    .frame(width: 46, height: 46)
                     .background(cyanAccent.opacity(0.18), in: Circle())
 
                 Text(videoURL == nil ? "Import Video" : "Change Video")
-                    .font(.system(size: 18, weight: .semibold))
+                    .font(.system(size: 17, weight: .semibold))
 
                 Text(videoURL == nil
                      ? "Select from Photos library"
                      : "Tap to replace current clip")
-                    .font(.system(size: 13))
+                    .font(.system(size: 12))
                     .foregroundStyle(mutedText)
             }
             .frame(maxWidth: .infinity)
-            .frame(height: 184)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .frame(height: 152)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
                     .stroke(
                         videoURL == nil ? Color.white.opacity(0.24) : cyanAccent.opacity(0.75),
                         style: StrokeStyle(
@@ -175,13 +171,13 @@ struct ContentView: View {
 
     // MARK: - Status
     private var status: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 7) {
             Circle()
                 .fill(videoURL == nil ? mutedText : cyanBright)
                 .frame(width: 7, height: 7)
 
             Text(videoName)
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(videoURL == nil ? mutedText : cyanBright)
                 .lineLimit(1)
         }
@@ -190,7 +186,7 @@ struct ContentView: View {
 
     // MARK: - Settings Panel
     private var settingsPanel: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 13) {
             sectionHeading("PLATFORM", detail: platform, highlight: true)
 
             HStack(spacing: 6) {
@@ -202,16 +198,16 @@ struct ContentView: View {
                     } label: {
                         SocialPlatformLogo(platform: name)
                             .frame(maxWidth: .infinity)
-                            .frame(height: 44)
+                            .frame(height: 38)
                             .foregroundStyle(platform == name ? cyanBright : mutedText)
                             .background(
                                 platform == name
                                     ? cyanAccent.opacity(0.2)
                                     : Color.clear
                             )
-                            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                             .overlay(
-                                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
                                     .stroke(
                                         platform == name
                                             ? cyanAccent.opacity(0.65)
@@ -227,7 +223,7 @@ struct ContentView: View {
             .padding(4)
             .background(
                 Color.black.opacity(0.28),
-                in: RoundedRectangle(cornerRadius: 15, style: .continuous)
+                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
             )
 
             Divider().overlay(Color.white.opacity(0.1))
@@ -243,10 +239,10 @@ struct ContentView: View {
             )
             choiceRow(rates, selection: $fps)
         }
-        .padding(18)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .padding(14)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .stroke(glassBorder, lineWidth: 1)
         )
     }
@@ -291,18 +287,18 @@ struct ContentView: View {
                 } label: {
                     let isSelected = selection.wrappedValue == option
                     Text(option)
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.system(size: 13, weight: .semibold))
                         .frame(maxWidth: .infinity)
-                        .frame(height: 43)
+                        .frame(height: 38)
                         .foregroundStyle(isSelected ? cyanBright : mutedText)
                         .background(
                             isSelected
                                 ? cyanAccent.opacity(0.2)
                                 : Color.clear
                         )
-                        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                         .overlay(
-                            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
                                 .stroke(
                                     isSelected
                                         ? cyanAccent.opacity(0.65)
@@ -317,7 +313,7 @@ struct ContentView: View {
         .padding(4)
         .background(
             Color.black.opacity(0.28),
-            in: RoundedRectangle(cornerRadius: 15, style: .continuous)
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
         )
     }
 
@@ -334,16 +330,16 @@ struct ContentView: View {
                         .tint(.white)
                 } else {
                     Image(systemName: "sparkles")
-                        .font(.system(size: 17, weight: .semibold))
+                        .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(.white)
                 }
 
                 Text(isProcessing ? "Processing Video..." : "Enhance & Export")
                     .foregroundStyle(.white)
             }
-            .font(.system(size: 17, weight: .bold))
+            .font(.system(size: 16, weight: .bold))
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 18)
+            .padding(.vertical, 15)
             .background(
                 LinearGradient(
                     colors: [cyanAccent, indigoAccent],
