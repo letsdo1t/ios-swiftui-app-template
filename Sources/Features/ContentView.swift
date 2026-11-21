@@ -1,9 +1,12 @@
 import SwiftUI
 import PhotosUI
+import Photos
 import AVFoundation
 import CoreImage
-import Vision
+import CoreImage.CIFilterBuiltins
 import UniformTypeIdentifiers
+
+// MARK: - Models
 
 private enum EnhanceStep: String, CaseIterable, Identifiable {
     case importClip = "Import"
@@ -20,273 +23,490 @@ private struct StatusLogEntry: Identifiable {
 }
 
 private struct SourceClipInfo {
-    let width: Int
+    let width: Int      // oriented (after rotation)
     let height: Int
     let durationSeconds: Double
+    let fps: Double
 
     var summary: String {
         let mins = Int(durationSeconds) / 60
         let secs = Int(durationSeconds) % 60
-        return "\(width)×\(height) · \(String(format: "%d:%02d", mins, secs))"
+        return "\(width)×\(height) · \(String(format: "%d:%02d", mins, secs)) · \(Int(fps.rounded()))fps"
     }
 }
 
-private struct ExportProfile {
-    let outputSize: CGSize
-    let targetFPS: Int32
-    let presetName: String
-    let bitrateMbps: Double
-    let opticalFlowActive: Bool
+/// Video dari PhotosPicker: disalin terus ke file (tak load seluruh video dalam RAM).
+private struct PickedVideo: Transferable {
+    let url: URL
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(contentType: .movie) { video in
+            SentTransferredFile(video.url)
+        } importing: { received in
+            let ext = received.file.pathExtension.isEmpty ? "mov" : received.file.pathExtension
+            let dest = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString)
+                .appendingPathExtension(ext)
+            try FileManager.default.copyItem(at: received.file, to: dest)
+            return PickedVideo(url: dest)
+        }
+    }
 }
 
 private struct ExportedVideoDocument: FileDocument {
     static var readableContentTypes: [UTType] { [.mpeg4Movie, .movie] }
-
     let sourceURL: URL
 
-    init(sourceURL: URL) {
-        self.sourceURL = sourceURL
-    }
-
-    init(configuration: ReadConfiguration) throws {
-        throw CocoaError(.fileReadUnsupportedScheme)
-    }
+    init(sourceURL: URL) { self.sourceURL = sourceURL }
+    init(configuration: ReadConfiguration) throws { throw CocoaError(.fileReadUnsupportedScheme) }
 
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
-        let data = try Data(contentsOf: sourceURL, options: .mappedIfSafe)
-        return FileWrapper(regularFileWithContents: data)
+        // Tanpa .immediate → tak baca seluruh file masuk memori
+        try FileWrapper(url: sourceURL, options: [])
     }
 }
 
-private final class NaiseAIEngine {
+// MARK: - Export planning (pure logic, mudah di-test)
+
+private struct EnhanceSettings {
+    var platform: String
+    var resolution: String
+    var requestedFPS: Int
+    var upscale: Bool
+    var useAI: Bool
+}
+
+private struct ExportPlan {
+    let outputSize: CGSize
+    let fps: Int
+    let bitrate: Int          // bits per second
+    let upscaled: Bool
+    var usedAI = false
+
+    var summary: String {
+        "\(Int(outputSize.width))×\(Int(outputSize.height)) · \(fps)fps · \(String(format: "%.0f", Double(bitrate) / 1_000_000)) Mbps" + (usedAI ? " · AI" : "")
+    }
+}
+
+private func planExport(orientedSize: CGSize, sourceFPS: Double, settings: EnhanceSettings) -> ExportPlan {
+    // "4K" = sisi panjang 3840 (versi lama tersilap 2160)
+    var targetLong: CGFloat = switch settings.resolution {
+    case "720p": 1280
+    case "1080p": 1920
+    default: 3840
+    }
+    if settings.platform == "WhatsApp" { targetLong = min(targetLong, 1280) }
+
+    let srcLong = max(orientedSize.width, orientedSize.height)
+    var scale = targetLong / srcLong
+    if settings.upscale {
+        scale = min(scale, 2.0)      // jangan upscale melampau
+    } else {
+        scale = min(scale, 1.0)
+    }
+
+    let w = max(2, (orientedSize.width * scale / 2).rounded() * 2)
+    let h = max(2, (orientedSize.height * scale / 2).rounded() * 2)
+
+    // FPS: jangan "reka" frame. 30fps → 60fps cuma duplicate frame (membazir bitrate, tak lagi smooth).
+    let srcRounded = max(1, Int(sourceFPS.rounded()))
+    let fps = max(1, min(settings.requestedFPS, srcRounded))
+
+    // Bitrate ikut bilangan pixel (bpp ≈ 0.19 @30fps), bukan nombor tetap.
+    let pixels = Double(w * h)
+    let fpsScale = pow(Double(fps) / 30.0, 0.7)
+    var bitrate = pixels * 30.0 * 0.19 * fpsScale
+    if settings.platform == "WhatsApp" { bitrate *= 0.75 }
+    bitrate = min(45_000_000, max(3_000_000, bitrate))
+
+    return ExportPlan(
+        outputSize: CGSize(width: w, height: h),
+        fps: fps,
+        bitrate: Int(bitrate),
+        upscaled: scale > 1.001
+    )
+}
+
+// MARK: - Transcoder (AVAssetReader → CoreImage/Metal → AVAssetWriter)
+
+private enum NaiseError: LocalizedError {
+    case noVideoTrack, invalidSize, cannotStartReader(String), cannotStartWriter(String)
+    case unsupportedSettings, failed(String), cancelled
+
+    var errorDescription: String? {
+        switch self {
+        case .noVideoTrack: return "No video track found"
+        case .invalidSize: return "Invalid video dimensions"
+        case .cannotStartReader(let m): return "Cannot read clip: \(m)"
+        case .cannotStartWriter(let m): return "Cannot write clip: \(m)"
+        case .unsupportedSettings: return "This device can't encode these settings. Try a lower resolution."
+        case .failed(let m): return m
+        case .cancelled: return "Export cancelled"
+        }
+    }
+}
+
+private final class NaiseTranscoder: @unchecked Sendable {
     private let ciContext: CIContext
-    private var previousBuffer: CVPixelBuffer?
-    private var lastFlowOverlay: CIImage?
-    private var frameCounter: Int = 0
+    private let lock = NSLock()
+    private var cancelledFlag = false
 
     init() {
-        if let metalDevice = MTLCreateSystemDefaultDevice() {
-            self.ciContext = CIContext(mtlDevice: metalDevice, options: [
-                .cacheIntermediates: true,
-                .name: "NaisePlusMetalContext"
-            ])
+        let options: [CIContextOption: Any] = [.cacheIntermediates: false]
+        if let device = MTLCreateSystemDefaultDevice() {
+            ciContext = CIContext(mtlDevice: device, options: options)
         } else {
-            self.ciContext = CIContext(options: [.useSoftwareRenderer: false])
+            ciContext = CIContext(options: options)
         }
     }
 
-    func reset() {
-        previousBuffer = nil
-        lastFlowOverlay = nil
-        frameCounter = 0
+    func cancel() { lock.lock(); cancelledFlag = true; lock.unlock() }
+    private var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelledFlag }
+
+    private func orientation(for t: CGAffineTransform) -> CGImagePropertyOrientation {
+        switch (t.a.rounded(), t.b.rounded(), t.c.rounded(), t.d.rounded()) {
+        case (0, 1, -1, 0): return .right
+        case (0, -1, 1, 0): return .left
+        case (-1, 0, 0, -1): return .down
+        default: return .up
+        }
     }
 
-    func renderFrame(
-        sourceBuffer: CVPixelBuffer,
-        to destinationBuffer: CVPixelBuffer,
-        sourceToOutputTransform: CGAffineTransform,
-        outputSize: CGSize,
-        platform: String,
-        targetFPS: Int32,
-        useOpticalFlow: Bool
-    ) {
-        autoreleasepool {
-            let outputRect = CGRect(origin: .zero, size: outputSize)
-            var image = CIImage(cvPixelBuffer: sourceBuffer)
-                .transformed(by: sourceToOutputTransform)
-                .cropped(to: outputRect)
+    func export(
+        inputURL: URL,
+        outputURL: URL,
+        settings: EnhanceSettings,
+        onProgress: @escaping @Sendable (Double) -> Void
+    ) async throws -> ExportPlan {
+        try await withTaskCancellationHandler {
+            try await run(inputURL: inputURL, outputURL: outputURL, settings: settings, onProgress: onProgress)
+        } onCancel: {
+            self.cancel()
+        }
+    }
 
-            frameCounter += 1
+    private func run(
+        inputURL: URL,
+        outputURL: URL,
+        settings: EnhanceSettings,
+        onProgress: @escaping @Sendable (Double) -> Void
+    ) async throws -> ExportPlan {
+        let asset = AVURLAsset(url: inputURL)
+        guard let vTrack = try await asset.loadTracks(withMediaType: .video).first else { throw NaiseError.noVideoTrack }
 
-            if useOpticalFlow, targetFPS == 60 {
-                if let prev = previousBuffer, frameCounter % 2 == 0 {
-                    if let computed = computeMotionFlowOverlay(from: prev, to: sourceBuffer, outputSize: outputSize) {
-                        lastFlowOverlay = computed
+        let natural = try await vTrack.load(.naturalSize)
+        let transform = try await vTrack.load(.preferredTransform)
+        let timeRange = try await vTrack.load(.timeRange)
+        let nominalFPS = Double(try await vTrack.load(.nominalFrameRate))
+        let characteristics = try await vTrack.load(.mediaCharacteristics)
+        let isHDR = characteristics.contains(.containsHDRVideo)
+
+        let orient = orientation(for: transform)
+        let swap = (orient == .left || orient == .right)
+        let orientedSize = swap
+            ? CGSize(width: natural.height, height: natural.width)
+            : natural
+        guard orientedSize.width > 0, orientedSize.height > 0 else { throw NaiseError.invalidSize }
+
+        let sourceFPS = nominalFPS > 0 ? nominalFPS : 30
+        let basePlan = planExport(orientedSize: orientedSize, sourceFPS: sourceFPS, settings: settings)
+
+        // AI super-resolution (iOS 26+). Nil → automatik guna mod Clean.
+        let aiStage: NaiseFrameUpscaler? = settings.useAI
+            ? await makeNaiseAIUpscaler(
+                width: Int(orientedSize.width),
+                height: Int(orientedSize.height),
+                requiredScale: basePlan.outputSize.height / orientedSize.height
+            )
+            : nil
+        var planWithAI = basePlan
+        planWithAI.usedAI = (aiStage != nil)
+        let plan = planWithAI
+        let outW = plan.outputSize.width, outH = plan.outputSize.height
+        let outRect = CGRect(origin: .zero, size: plan.outputSize)
+
+        try? FileManager.default.removeItem(at: outputURL)
+
+        // ---- Reader ----
+        let reader = try AVAssetReader(asset: asset)
+
+        var vReadSettings: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+        ]
+        if isHDR {
+            // HDR (HLG/Dolby Vision iPhone) → tukar ke SDR Rec.709 supaya warna tak pudar
+            vReadSettings[AVVideoColorPropertiesKey] = [
+                AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
+                AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
+                AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2
+            ]
+        }
+        let vOutput = AVAssetReaderTrackOutput(track: vTrack, outputSettings: vReadSettings)
+        vOutput.alwaysCopiesSampleData = false
+        guard reader.canAdd(vOutput) else { throw NaiseError.cannotStartReader("video output") }
+        reader.add(vOutput)
+
+        var aOutput: AVAssetReaderTrackOutput?
+        if let aTrack = try await asset.loadTracks(withMediaType: .audio).first {
+            let out = AVAssetReaderTrackOutput(track: aTrack, outputSettings: [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVLinearPCMBitDepthKey: 16,
+                AVLinearPCMIsFloatKey: false,
+                AVLinearPCMIsBigEndianKey: false,
+                AVLinearPCMIsNonInterleaved: false,
+                AVNumberOfChannelsKey: 2,
+                AVSampleRateKey: 48_000
+            ])
+            if reader.canAdd(out) { reader.add(out); aOutput = out }
+        }
+
+        // ---- Writer ----
+        let writer = try AVAssetWriter(outputURL: outputURL, outputFileType: .mp4)
+        writer.shouldOptimizeForNetworkUse = true   // faststart → upload cepat mula
+
+        func videoSettings(codec: AVVideoCodecType, bitrate: Int) -> [String: Any] {
+            var compression: [String: Any] = [
+                AVVideoAverageBitRateKey: bitrate,
+                AVVideoMaxKeyFrameIntervalKey: plan.fps * 2,
+                AVVideoExpectedSourceFrameRateKey: plan.fps,
+                AVVideoAllowFrameReorderingKey: true
+            ]
+            if codec == .h264 {
+                compression[AVVideoProfileLevelKey] = AVVideoProfileLevelH264HighAutoLevel
+                compression[AVVideoH264EntropyModeKey] = AVVideoH264EntropyModeCABAC
+            }
+            return [
+                AVVideoCodecKey: codec,
+                AVVideoWidthKey: Int(outW),
+                AVVideoHeightKey: Int(outH),
+                AVVideoColorPropertiesKey: [
+                    AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
+                    AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
+                    AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2
+                ],
+                AVVideoCompressionPropertiesKey: compression
+            ]
+        }
+
+        // H.264 dulu (paling serasi dengan IG/TikTok/WhatsApp); kalau device tak support, jatuh ke HEVC
+        var chosen = videoSettings(codec: .h264, bitrate: plan.bitrate)
+        if !writer.canApply(outputSettings: chosen, forMediaType: .video) {
+            chosen = videoSettings(codec: .hevc, bitrate: Int(Double(plan.bitrate) * 0.7))
+            guard writer.canApply(outputSettings: chosen, forMediaType: .video) else { throw NaiseError.unsupportedSettings }
+        }
+
+        let vInput = AVAssetWriterInput(mediaType: .video, outputSettings: chosen)
+        vInput.expectsMediaDataInRealTime = false
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: vInput,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: Int(outW),
+                kCVPixelBufferHeightKey as String: Int(outH),
+                kCVPixelBufferMetalCompatibilityKey as String: true,
+                kCVPixelBufferIOSurfacePropertiesKey as String: [:]
+            ]
+        )
+        guard writer.canAdd(vInput) else { throw NaiseError.cannotStartWriter("video input") }
+        writer.add(vInput)
+
+        var aInput: AVAssetWriterInput?
+        if aOutput != nil {
+            let input = AVAssetWriterInput(mediaType: .audio, outputSettings: [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVNumberOfChannelsKey: 2,
+                AVSampleRateKey: 48_000,
+                AVEncoderBitRateKey: 192_000
+            ])
+            input.expectsMediaDataInRealTime = false
+            if writer.canAdd(input) { writer.add(input); aInput = input }
+        }
+
+        guard reader.startReading() else {
+            throw NaiseError.cannotStartReader(reader.error?.localizedDescription ?? "unknown")
+        }
+        guard writer.startWriting() else {
+            throw NaiseError.cannotStartWriter(writer.error?.localizedDescription ?? "unknown")
+        }
+        let startTime = timeRange.start
+        writer.startSession(atSourceTime: startTime)
+
+        // ---- Per-frame pipeline ----
+        let totalSeconds = max(0.001, CMTimeGetSeconds(timeRange.duration))
+        let startSeconds = CMTimeGetSeconds(startTime)
+        let interval = 1.0 / Double(plan.fps)
+        let needsDrop = sourceFPS > Double(plan.fps) + 1.5   // contoh 60 → 30
+        let sharpness: Double = {
+            var s: Double = switch settings.platform {
+            case "WhatsApp": 0.30
+            case "TikTok", "Instagram": 0.22
+            default: 0.18
+            }
+            if plan.upscaled { s += 0.06 }
+            return s
+        }()
+        let denoiseLevel: Float = plan.upscaled ? 0.015 : 0.008
+        let allowDenoise = max(outW, outH) <= 2500    // 4K: skip, terlalu berat & tak perlu
+        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let ctx = ciContext
+        let srcW = orientedSize.width, srcH = orientedSize.height
+
+        func enhance(_ buffer: CVPixelBuffer, pts: CMTime) -> CIImage {
+            var image = CIImage(cvPixelBuffer: buffer).oriented(orient)
+            image = image.transformed(by: CGAffineTransform(translationX: -image.extent.minX, y: -image.extent.minY))
+
+            // 1) Denoise dulu di resolusi asal (murah & elak noise di-upscale)
+            if allowDenoise {
+                let nr = CIFilter.noiseReduction()
+                nr.inputImage = image
+                nr.noiseLevel = denoiseLevel
+                nr.sharpness = 0.30
+                if let out = nr.outputImage { image = out.cropped(to: CGRect(x: 0, y: 0, width: srcW, height: srcH)) }
+            }
+
+            // 2) AI super-resolution (kalau tersedia) sebelum resize akhir
+            if let aiStage, let up = aiStage.upscale(image, pts: pts, context: ctx) {
+                image = up
+            }
+
+            // 3) Lanczos resize ke saiz akhir (kualiti jauh lebih baik dari affine biasa)
+            let curW = image.extent.width, curH = image.extent.height
+            if abs(outH - curH) > 0.5 || abs(outW - curW) > 0.5 {
+                let scaleY = outH / curH
+                let scaleX = outW / curW
+                let lz = CIFilter.lanczosScaleTransform()
+                lz.inputImage = image
+                lz.scale = Float(scaleY)
+                lz.aspectRatio = Float(scaleX / scaleY)
+                if let out = lz.outputImage { image = out }
+            }
+            image = image.cropped(to: outRect)
+
+            // 3) Sharpen LEPAS resize (versi lama sharpen sebelum denoise → effect hilang)
+            let sh = CIFilter.sharpenLuminance()
+            sh.inputImage = image
+            sh.sharpness = Float(sharpness)
+            if let out = sh.outputImage { image = out.cropped(to: outRect) }
+
+            // 4) Colour sedikit
+            let cc = CIFilter.colorControls()
+            cc.inputImage = image
+            cc.contrast = 1.02
+            cc.saturation = 1.01
+            cc.brightness = 0
+            if let out = cc.outputImage { image = out.cropped(to: outRect) }
+            return image
+        }
+
+        let group = DispatchGroup()
+        let videoQueue = DispatchQueue(label: "naise.video.write", qos: .userInitiated)
+        let audioQueue = DispatchQueue(label: "naise.audio.write", qos: .userInitiated)
+
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<ExportPlan, Error>) in
+            var videoDone = false
+            var nextEmit = startSeconds
+            var lastReported = 0.0
+
+            group.enter()
+            vInput.requestMediaDataWhenReady(on: videoQueue) { [self] in
+                guard !videoDone else { return }
+                while vInput.isReadyForMoreMediaData {
+                    var finish = isCancelled || reader.status != .reading || writer.status != .writing
+                    var sampleToProcess: CMSampleBuffer?
+                    if !finish {
+                        sampleToProcess = vOutput.copyNextSampleBuffer()
+                        finish = (sampleToProcess == nil)
+                    }
+                    if finish {
+                        videoDone = true
+                        vInput.markAsFinished()
+                        group.leave()
+                        return
+                    }
+                    guard let sample = sampleToProcess,
+                          let srcBuffer = CMSampleBufferGetImageBuffer(sample) else { continue }
+
+                    let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+                    let t = CMTimeGetSeconds(pts)
+
+                    if needsDrop {
+                        if t < nextEmit - interval * 0.4 { continue }
+                        nextEmit += interval
+                        if nextEmit < t { nextEmit = t + interval }
+                    }
+
+                    var ok = true
+                    autoreleasepool {
+                        guard let pool = adaptor.pixelBufferPool else { ok = false; return }
+                        var dst: CVPixelBuffer?
+                        CVPixelBufferPoolCreatePixelBuffer(nil, pool, &dst)
+                        guard let dstBuffer = dst else { ok = false; return }
+                        ctx.render(enhance(srcBuffer, pts: pts), to: dstBuffer, bounds: outRect, colorSpace: colorSpace)
+                        ok = adaptor.append(dstBuffer, withPresentationTime: pts)
+                    }
+                    if !ok {
+                        reader.cancelReading()
+                        videoDone = true
+                        vInput.markAsFinished()
+                        group.leave()
+                        return
+                    }
+
+                    let p = min(1, max(0, (t - startSeconds) / totalSeconds))
+                    if p - lastReported >= 0.01 { lastReported = p; onProgress(p) }
+                }
+            }
+
+            if let aInput, let aOutput {
+                var audioDone = false
+                group.enter()
+                aInput.requestMediaDataWhenReady(on: audioQueue) { [self] in
+                    guard !audioDone else { return }
+                    while aInput.isReadyForMoreMediaData {
+                        if isCancelled || reader.status != .reading || writer.status != .writing {
+                            audioDone = true; aInput.markAsFinished(); group.leave(); return
+                        }
+                        guard let sample = aOutput.copyNextSampleBuffer() else {
+                            audioDone = true; aInput.markAsFinished(); group.leave(); return
+                        }
+                        if !aInput.append(sample) {
+                            audioDone = true; aInput.markAsFinished(); group.leave(); return
+                        }
                     }
                 }
-                if let flowOverlay = lastFlowOverlay {
-                    image = flowOverlay.composited(over: image).cropped(to: outputRect)
+            }
+
+            group.notify(queue: .global(qos: .userInitiated)) { [self] in
+                aiStage?.finish()
+                if isCancelled {
+                    reader.cancelReading()
+                    writer.cancelWriting()
+                    try? FileManager.default.removeItem(at: outputURL)
+                    cont.resume(throwing: NaiseError.cancelled)
+                    return
+                }
+                if reader.status == .failed {
+                    writer.cancelWriting()
+                    cont.resume(throwing: NaiseError.failed(reader.error?.localizedDescription ?? "Read failed"))
+                    return
+                }
+                if writer.status == .failed {
+                    cont.resume(throwing: NaiseError.failed(writer.error?.localizedDescription ?? "Write failed"))
+                    return
+                }
+                writer.finishWriting {
+                    if writer.status == .completed {
+                        onProgress(1)
+                        cont.resume(returning: plan)
+                    } else {
+                        cont.resume(throwing: NaiseError.failed(writer.error?.localizedDescription ?? "Finalize failed"))
+                    }
                 }
             }
-            previousBuffer = sourceBuffer
-
-            if let sharpen = CIFilter(name: "CISharpenLuminance") {
-                sharpen.setValue(image, forKey: kCIInputImageKey)
-                let sharpness: Double = switch platform {
-                case "WhatsApp": 0.36
-                case "TikTok", "Instagram": 0.28
-                default: 0.24
-                }
-                sharpen.setValue(sharpness, forKey: kCIInputSharpnessKey)
-                if let out = sharpen.outputImage {
-                    image = out.cropped(to: outputRect)
-                }
-            }
-
-            if let colorControls = CIFilter(name: "CIColorControls") {
-                colorControls.setValue(image, forKey: kCIInputImageKey)
-                colorControls.setValue(1.04, forKey: kCIInputContrastKey)
-                colorControls.setValue(1.03, forKey: kCIInputSaturationKey)
-                colorControls.setValue(0.0, forKey: kCIInputBrightnessKey)
-                if let out = colorControls.outputImage {
-                    image = out.cropped(to: outputRect)
-                }
-            }
-
-            if let denoise = CIFilter(name: "CINoiseReduction") {
-                denoise.setValue(image, forKey: kCIInputImageKey)
-                denoise.setValue(0.015, forKey: "inputNoiseLevel")
-                denoise.setValue(0.35, forKey: "inputSharpness")
-                if let out = denoise.outputImage {
-                    image = out.cropped(to: outputRect)
-                }
-            }
-
-            ciContext.render(image, to: destinationBuffer, bounds: outputRect, colorSpace: CGColorSpaceCreateDeviceRGB())
-        }
-    }
-
-    private func computeMotionFlowOverlay(
-        from prevBuffer: CVPixelBuffer,
-        to currentBuffer: CVPixelBuffer,
-        outputSize: CGSize
-    ) -> CIImage? {
-        let request = VNGenerateOpticalFlowRequest(
-            targetedCVPixelBuffer: currentBuffer,
-            options: [:]
-        )
-        request.computationAccuracy = .low
-
-        let handler = VNImageRequestHandler(cvPixelBuffer: prevBuffer, options: [:])
-        do {
-            try handler.perform([request])
-            guard let flowObservation = request.results?.first as? VNPixelBufferObservation else {
-                return lastFlowOverlay
-            }
-            let flowCI = CIImage(cvPixelBuffer: flowObservation.pixelBuffer)
-            let sx = outputSize.width / max(1, flowCI.extent.width)
-            let sy = outputSize.height / max(1, flowCI.extent.height)
-            let scaledFlow = flowCI.transformed(by: CGAffineTransform(scaleX: sx, y: sy))
-
-            if let opacityFilter = CIFilter(name: "CIOpacity") {
-                opacityFilter.setValue(scaledFlow, forKey: kCIInputImageKey)
-                opacityFilter.setValue(0.12, forKey: "inputOpacity")
-                return opacityFilter.outputImage?.cropped(to: CGRect(origin: .zero, size: outputSize))
-            }
-        } catch {
-            return lastFlowOverlay
-        }
-        return lastFlowOverlay
-    }
-}
-
-private final class NaiseCompositorConfig: @unchecked Sendable {
-    static let shared = NaiseCompositorConfig()
-
-    private let lock = NSLock()
-    private var engine = NaiseAIEngine()
-    private var sourceToOutputTransform = CGAffineTransform.identity
-    private var outputSize = CGSize(width: 1080, height: 1920)
-    private var platform = "Instagram"
-    private var targetFPS: Int32 = 60
-    private var useOpticalFlow = false
-
-    func configure(
-        engine: NaiseAIEngine,
-        sourceToOutputTransform: CGAffineTransform,
-        outputSize: CGSize,
-        platform: String,
-        targetFPS: Int32,
-        useOpticalFlow: Bool
-    ) {
-        lock.lock()
-        defer { lock.unlock() }
-        self.engine = engine
-        self.sourceToOutputTransform = sourceToOutputTransform
-        self.outputSize = outputSize
-        self.platform = platform
-        self.targetFPS = targetFPS
-        self.useOpticalFlow = useOpticalFlow
-    }
-
-    func current() -> (NaiseAIEngine, CGAffineTransform, CGSize, String, Int32, Bool) {
-        lock.lock()
-        defer { lock.unlock() }
-        return (engine, sourceToOutputTransform, outputSize, platform, targetFPS, useOpticalFlow)
-    }
-}
-
-private final class NaiseActiveCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
-    private let queue = DispatchQueue(label: "naise.plus.active.compositor", qos: .userInitiated)
-    private var cancelled = false
-
-    var sourcePixelBufferAttributes: [String: Any]? {
-        [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-            kCVPixelBufferMetalCompatibilityKey as String: true
-        ]
-    }
-
-    var requiredPixelBufferAttributesForRenderContext: [String: Any] {
-        [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-            kCVPixelBufferMetalCompatibilityKey as String: true
-        ]
-    }
-
-    func renderContextChanged(_ newRenderContext: AVVideoCompositionRenderContext) {
-        queue.async {
-            self.cancelled = false
-        }
-    }
-
-    func startRequest(_ asyncVideoCompositionRequest: AVAsynchronousVideoCompositionRequest) {
-        queue.async {
-            if self.cancelled {
-                asyncVideoCompositionRequest.finishCancelledRequest()
-                return
-            }
-
-            guard let trackID = asyncVideoCompositionRequest.sourceTrackIDs.first?.int32Value,
-                  let srcBuffer = asyncVideoCompositionRequest.sourceFrame(byTrackID: trackID) else {
-                asyncVideoCompositionRequest.finish(with: NSError(
-                    domain: "NaisePlus",
-                    code: 20,
-                    userInfo: [NSLocalizedDescriptionKey: "Source frame unavailable"]
-                ))
-                return
-            }
-
-            guard let dstBuffer = asyncVideoCompositionRequest.renderContext.newPixelBuffer() else {
-                asyncVideoCompositionRequest.finish(with: NSError(
-                    domain: "NaisePlus",
-                    code: 21,
-                    userInfo: [NSLocalizedDescriptionKey: "Destination buffer unavailable"]
-                ))
-                return
-            }
-
-            let (engine, transform, outSize, platform, fps, useFlow) = NaiseCompositorConfig.shared.current()
-            engine.renderFrame(
-                sourceBuffer: srcBuffer,
-                to: dstBuffer,
-                sourceToOutputTransform: transform,
-                outputSize: outSize,
-                platform: platform,
-                targetFPS: fps,
-                useOpticalFlow: useFlow
-            )
-
-            asyncVideoCompositionRequest.finish(withComposedVideoFrame: dstBuffer)
-        }
-    }
-
-    func cancelAllPendingVideoCompositionRequests() {
-        queue.async {
-            self.cancelled = true
         }
     }
 }
+
+// MARK: - UI
 
 struct ContentView: View {
     @State private var isLightMode = false
@@ -300,13 +520,16 @@ struct ContentView: View {
     @State private var currentStep: EnhanceStep = .importClip
     @State private var renderProgress: Double = 0
     @State private var logs: [StatusLogEntry] = [
-        StatusLogEntry(timeText: "NOW", message: "Naise+ active AI engine ready")
+        StatusLogEntry(timeText: "NOW", message: "Naise+ Metal engine ready")
     ]
     @State private var isProcessing = false
     @State private var exportError: String?
     @State private var platform = "Instagram"
     @State private var resolution = "1080p"
-    @State private var fps = "60 FPS"
+    @State private var fps = "30 FPS"
+    @State private var upscale = true
+    @State private var useAI = true
+    @State private var activeTranscoder: NaiseTranscoder?
 
     private let darkBgTop = Color(red: 0.08, green: 0.14, blue: 0.24)
     private let darkBgMid = Color(red: 0.05, green: 0.08, blue: 0.15)
@@ -332,61 +555,69 @@ struct ContentView: View {
     private let resolutions = ["720p", "1080p", "4K"]
     private let rates = ["30 FPS", "60 FPS"]
 
+    private static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
+
+    private var currentSettings: EnhanceSettings {
+        EnhanceSettings(platform: platform, resolution: resolution, requestedFPS: fps == "60 FPS" ? 60 : 30, upscale: upscale, useAI: useAI)
+    }
+
+    /// Preview output sebenar sebelum render
+    private var plannedSummary: String {
+        guard let info = sourceInfo else { return "\(resolution) · \(fps)" }
+        let plan = planExport(
+            orientedSize: CGSize(width: info.width, height: info.height),
+            sourceFPS: info.fps,
+            settings: currentSettings
+        )
+        return "Output \(plan.summary)"
+    }
+
+    private var detailText: String {
+        (videoURL != nil && !isProcessing && currentStep == .profile) ? plannedSummary : statusDetail
+    }
+
     var body: some View {
         GeometryReader { geometry in
-            VStack(spacing: 0) {
-                header.padding(.top, 10)
-                importArea.padding(.top, 12)
-                clearStatusCard.padding(.top, 10)
-                settingsPanel.padding(.top, 10)
-                Spacer(minLength: 8)
-                exportButton
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 0) {
+                    header.padding(.top, 10)
+                    importArea.padding(.top, 12)
+                    clearStatusCard.padding(.top, 10)
+                    settingsPanel.padding(.top, 10)
+                    Spacer(minLength: 12)
+                    exportButton
 
-                if exportedVideoURL != nil {
-                    Button {
-                        isShowingFileExporter = true
-                    } label: {
-                        Label("Save to Files (.mp4)", systemImage: "folder.badge.plus")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(activeAccent)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 11)
-                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 13))
-                            .overlay(RoundedRectangle(cornerRadius: 13).stroke(cyanAccent.opacity(0.45), lineWidth: 1))
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.top, 8)
-                    .fileExporter(
-                        isPresented: $isShowingFileExporter,
-                        document: ExportedVideoDocument(sourceURL: exportedVideoURL!),
-                        contentType: .mpeg4Movie,
-                        defaultFilename: "NaisePlus_\(platform)_\(resolution)_\(fps.replacingOccurrences(of: " ", with: ""))"
-                    ) { result in
-                        switch result {
-                        case .success:
-                            statusTitle = "Saved to Files"
-                            statusDetail = "Video saved in Files app"
-                            appendLog("Saved to Files app")
-                        case .failure(let error):
-                            exportError = error.localizedDescription
-                            appendLog("Save to Files cancelled/failed")
+                    if exportedVideoURL != nil {
+                        HStack(spacing: 8) {
+                            secondaryButton("Save to Photos", icon: "photo.badge.plus") {
+                                Task { await saveToPhotos() }
+                            }
+                            secondaryButton("Files", icon: "folder.badge.plus") {
+                                isShowingFileExporter = true
+                            }
                         }
+                        .padding(.top, 8)
+                    }
+
+                    if let exportError {
+                        Text(exportError)
+                            .font(.caption2)
+                            .foregroundStyle(.red)
+                            .lineLimit(3)
+                            .multilineTextAlignment(.center)
+                            .padding(.top, 5)
                     }
                 }
-
-                if let exportError {
-                    Text(exportError)
-                        .font(.caption2)
-                        .foregroundStyle(.red)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.center)
-                        .padding(.top, 5)
-                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 10)
+                .frame(maxWidth: 500)
+                .frame(width: geometry.size.width)
+                .frame(minHeight: geometry.size.height, alignment: .top)
             }
-            .padding(.horizontal, 20)
-            .padding(.bottom, 10)
-            .frame(maxWidth: 500)
-            .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
             .background {
                 ZStack {
                     LinearGradient(
@@ -404,6 +635,35 @@ struct ContentView: View {
         }
         .foregroundStyle(primaryText)
         .preferredColorScheme(isLightMode ? .light : .dark)
+        .fileExporter(
+            isPresented: $isShowingFileExporter,
+            document: ExportedVideoDocument(sourceURL: exportedVideoURL ?? URL(fileURLWithPath: "/dev/null")),
+            contentType: .mpeg4Movie,
+            defaultFilename: "NaisePlus_\(platform)_\(resolution)"
+        ) { result in
+            switch result {
+            case .success:
+                statusTitle = "Saved to Files"
+                statusDetail = "Video saved in Files app"
+                appendLog("Saved to Files app")
+            case .failure(let error):
+                exportError = error.localizedDescription
+                appendLog("Save to Files failed")
+            }
+        }
+    }
+
+    private func secondaryButton(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: icon)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(activeAccent)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 11)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 13))
+                .overlay(RoundedRectangle(cornerRadius: 13).stroke(cyanAccent.opacity(0.45), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
     }
 
     private var header: some View {
@@ -463,6 +723,7 @@ struct ContentView: View {
                     )
             }
         }
+        .disabled(isProcessing)
         .onChange(of: selectedVideo) { _, item in
             Task { await loadVideo(item) }
         }
@@ -514,7 +775,7 @@ struct ContentView: View {
                 .frame(height: 4)
             }
 
-            Text(statusDetail)
+            Text(detailText)
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(mutedText)
                 .lineLimit(1)
@@ -572,12 +833,37 @@ struct ContentView: View {
             choiceRow(resolutions, selection: $resolution, labelPrefix: "Res")
 
             Divider().overlay(glassBorder)
-            sectionHeading("FRAME RATE", detail: fps == "60 FPS" ? "Smooth" : "Standard")
+            sectionHeading("MAX FRAME RATE", detail: fps == "60 FPS" ? "Smooth (if source ≥ 60)" : "Standard")
             choiceRow(rates, selection: $fps, labelPrefix: "FPS")
+
+            Divider().overlay(glassBorder)
+            HStack {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("UPSCALE TO TARGET").font(.system(size: 10, weight: .semibold)).tracking(1.2).foregroundStyle(mutedText)
+                    Text("Lanczos resize, keeps more detail after IG/TikTok re-compress")
+                        .font(.system(size: 10)).foregroundStyle(mutedText).lineLimit(1)
+                }
+                Spacer()
+                Toggle("", isOn: $upscale).labelsHidden().tint(cyanAccent)
+            }
+
+            if #available(iOS 26.0, *) {
+                Divider().overlay(glassBorder)
+                HStack {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("AI SUPER RESOLUTION").font(.system(size: 10, weight: .semibold)).tracking(1.2).foregroundStyle(mutedText)
+                        Text("On-device ML · best for 720p or lower clips · auto-falls back")
+                            .font(.system(size: 10)).foregroundStyle(mutedText).lineLimit(1)
+                    }
+                    Spacer()
+                    Toggle("", isOn: $useAI).labelsHidden().tint(cyanAccent)
+                }
+            }
         }
         .padding(12)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
         .overlay(RoundedRectangle(cornerRadius: 20).stroke(glassBorder, lineWidth: 1))
+        .disabled(isProcessing)
     }
 
     private var resolutionDetail: String {
@@ -603,9 +889,6 @@ struct ContentView: View {
                 Button {
                     withAnimation(.snappy(duration: 0.2)) {
                         selection.wrappedValue = option
-                        if videoURL != nil && !isProcessing {
-                            statusDetail = "Metal AI + Vision · \(resolution) · \(fps)"
-                        }
                         appendLog("\(labelPrefix): \(option)")
                     }
                 } label: {
@@ -627,7 +910,11 @@ struct ContentView: View {
 
     private var exportButton: some View {
         Button {
-            Task { await exportVideo() }
+            if isProcessing {
+                activeTranscoder?.cancel()
+            } else {
+                Task { await exportVideo() }
+            }
         } label: {
             HStack(spacing: 10) {
                 if isProcessing {
@@ -635,7 +922,7 @@ struct ContentView: View {
                 } else {
                     Image(systemName: "sparkles").font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
                 }
-                Text(isProcessing ? "AI Enhancing \(fps)..." : "Enhance & Export").foregroundStyle(.white)
+                Text(isProcessing ? "Rendering… tap to cancel" : "Enhance & Export").foregroundStyle(.white)
             }
             .font(.system(size: 15, weight: .bold))
             .frame(maxWidth: .infinity)
@@ -643,17 +930,15 @@ struct ContentView: View {
             .background(LinearGradient(colors: [cyanAccent, indigoAccent], startPoint: .leading, endPoint: .trailing))
             .clipShape(Capsule())
         }
-        .disabled(videoURL == nil || isProcessing)
-        .opacity(videoURL == nil || isProcessing ? 0.55 : 1)
+        .disabled(videoURL == nil)
+        .opacity(videoURL == nil ? 0.55 : 1)
     }
 
+    // MARK: Logic
+
     private func appendLog(_ message: String) {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        logs.append(StatusLogEntry(timeText: formatter.string(from: Date()), message: message))
-        if logs.count > 16 {
-            logs.removeFirst(logs.count - 16)
-        }
+        logs.append(StatusLogEntry(timeText: Self.timeFormatter.string(from: Date()), message: message))
+        if logs.count > 16 { logs.removeFirst(logs.count - 16) }
     }
 
     private func cleanupTempFile(_ url: URL?) {
@@ -685,34 +970,37 @@ struct ContentView: View {
         appendLog("Importing clip")
 
         do {
-            guard let data = try await item.loadTransferable(type: Data.self) else {
+            guard let picked = try await item.loadTransferable(type: PickedVideo.self) else {
                 statusTitle = "Import unavailable"
                 statusDetail = "Could not read video data"
                 appendLog("Empty video data")
                 return
             }
-            let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent(UUID().uuidString)
-                .appendingPathExtension("mov")
-            try data.write(to: url, options: .atomic)
-
+            let url = picked.url
             let asset = AVURLAsset(url: url)
-            if let track = try await asset.loadTracks(withMediaType: .video).first {
-                let nat = try await track.load(.naturalSize)
-                let tf = try await track.load(.preferredTransform)
-                let tr = try await track.load(.timeRange)
-                let rect = CGRect(origin: .zero, size: nat).applying(tf)
-                sourceInfo = SourceClipInfo(
-                    width: Int(abs(rect.width)),
-                    height: Int(abs(rect.height)),
-                    durationSeconds: max(0, CMTimeGetSeconds(tr.duration))
-                )
+            guard let track = try await asset.loadTracks(withMediaType: .video).first else {
+                cleanupTempFile(url)
+                statusTitle = "Import failed"
+                statusDetail = "No video track in this file"
+                appendLog("No video track")
+                return
             }
+            let nat = try await track.load(.naturalSize)
+            let tf = try await track.load(.preferredTransform)
+            let tr = try await track.load(.timeRange)
+            let rate = try await track.load(.nominalFrameRate)
+            let rect = CGRect(origin: .zero, size: nat).applying(tf)
+            sourceInfo = SourceClipInfo(
+                width: Int(abs(rect.width)),
+                height: Int(abs(rect.height)),
+                durationSeconds: max(0, CMTimeGetSeconds(tr.duration)),
+                fps: rate > 0 ? Double(rate) : 30
+            )
 
             videoURL = url
             currentStep = .profile
-            statusTitle = "Clean source ready"
-            statusDetail = "\(sourceInfo?.summary ?? "Clip") · \(resolution) · \(fps)"
+            statusTitle = "Source ready"
+            statusDetail = sourceInfo?.summary ?? "Clip loaded"
             appendLog("Loaded \(sourceInfo?.summary ?? "video")")
         } catch {
             exportError = error.localizedDescription
@@ -736,45 +1024,48 @@ struct ContentView: View {
         exportError = nil
         renderProgress = 0
         currentStep = .render
-        statusTitle = "AI Engine Active (\(fps))"
-        statusDetail = "Metal clarity + Vision flow (\(resolution))..."
-        appendLog("Active AI \(resolution) @ \(fps) (\(platform))")
+        statusTitle = "Rendering"
+        statusDetail = "Keep the app open until it finishes"
+        appendLog("Export \(resolution) (\(platform))")
 
-        let targetFPS: Int32 = fps == "60 FPS" ? 60 : 30
-        let chosenResolution = resolution
-        let chosenPlatform = platform
-        let clipDuration = sourceInfo?.durationSeconds ?? 10.0
+        // Jangan biar skrin tidur masa render
+        UIApplication.shared.isIdleTimerDisabled = true
+        let transcoder = NaiseTranscoder()
+        activeTranscoder = transcoder
 
         defer {
             isProcessing = false
+            activeTranscoder = nil
+            UIApplication.shared.isIdleTimerDisabled = false
         }
 
-        do {
-            let outputURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("NaisePlus_Pro_\(UUID().uuidString)")
-                .appendingPathExtension("mp4")
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NaisePlus_\(UUID().uuidString)")
+            .appendingPathExtension("mp4")
 
-            let profile = try await runActiveAIEngineExport(
+        do {
+            let plan = try await transcoder.export(
                 inputURL: videoURL,
                 outputURL: outputURL,
-                platform: chosenPlatform,
-                resolution: chosenResolution,
-                targetFPS: targetFPS,
-                durationSeconds: clipDuration,
+                settings: currentSettings,
                 onProgress: { p in
-                    Task { @MainActor in
-                        renderProgress = min(1.0, max(0.0, p))
-                    }
+                    Task { @MainActor in renderProgress = p }
                 }
             )
-
             exportedVideoURL = outputURL
-            renderProgress = 1.0
+            renderProgress = 1
             currentStep = .ready
-            statusTitle = "AI Export ready"
-            statusDetail = "\(Int(profile.outputSize.width))×\(Int(profile.outputSize.height)) · \(profile.targetFPS)FPS · Tap Save to Files"
-            appendLog("Ready · \(profile.opticalFlowActive ? "Flow+Metal" : "Metal") · Save to Files")
+            statusTitle = "Export ready"
+            statusDetail = "\(plan.summary) · Save to Photos"
+            appendLog("Ready · \(plan.summary)")
+        } catch let error as NaiseError where { if case .cancelled = error { return true } else { return false } }() {
+            cleanupTempFile(outputURL)
+            currentStep = .profile
+            statusTitle = "Cancelled"
+            statusDetail = "Adjust settings and retry"
+            appendLog("Export cancelled")
         } catch {
+            cleanupTempFile(outputURL)
             exportError = error.localizedDescription
             currentStep = .profile
             statusTitle = "Export failed"
@@ -782,157 +1073,31 @@ struct ContentView: View {
             appendLog("Failed: \(error.localizedDescription)")
         }
     }
-}
 
-private func buildActiveProfile(
-    orientedSize: CGSize,
-    durationSeconds: Double,
-    platform: String,
-    resolution: String,
-    targetFPS: Int32,
-    compatiblePresets: [String]
-) -> ExportProfile {
-    let maxSide: CGFloat
-    let basePreset: String
-    switch resolution {
-    case "720p":
-        maxSide = 1280
-        basePreset = AVAssetExportPreset1280x720
-    case "1080p":
-        maxSide = 1920
-        basePreset = AVAssetExportPreset1920x1080
-    default:
-        maxSide = 2160
-        basePreset = AVAssetExportPresetHighestQuality
-    }
-
-    let platformCap: CGFloat = platform == "WhatsApp" ? min(maxSide, 1280) : maxSide
-    let scale = min(1.0, platformCap / max(orientedSize.width, orientedSize.height))
-    let outputSize = CGSize(
-        width: max(2, floor(orientedSize.width * scale / 2) * 2),
-        height: max(2, floor(orientedSize.height * scale / 2) * 2)
-    )
-
-    let fpsMultiplier: Double = targetFPS == 60 ? 1.35 : 1.0
-    let baseMbps: Double
-    switch resolution {
-    case "720p": baseMbps = 5.5
-    case "1080p": baseMbps = 10.5
-    default: baseMbps = 18.0
-    }
-    let platformFactor: Double = platform == "WhatsApp" ? 0.75 : 1.0
-    let bitrateMbps = max(2.5, min(28.0, baseMbps * fpsMultiplier * platformFactor))
-
-    let chosenPreset: String
-    if compatiblePresets.contains(basePreset) {
-        chosenPreset = basePreset
-    } else if compatiblePresets.contains(AVAssetExportPresetHighestQuality) {
-        chosenPreset = AVAssetExportPresetHighestQuality
-    } else {
-        chosenPreset = compatiblePresets.first ?? AVAssetExportPresetMediumQuality
-    }
-
-    let opticalFlowActive = targetFPS == 60 && durationSeconds <= 45.0 && max(outputSize.width, outputSize.height) <= 1920
-
-    return ExportProfile(
-        outputSize: outputSize,
-        targetFPS: targetFPS,
-        presetName: chosenPreset,
-        bitrateMbps: bitrateMbps,
-        opticalFlowActive: opticalFlowActive
-    )
-}
-
-private func runActiveAIEngineExport(
-    inputURL: URL,
-    outputURL: URL,
-    platform: String,
-    resolution: String,
-    targetFPS: Int32,
-    durationSeconds: Double,
-    onProgress: @escaping (Double) -> Void
-) async throws -> ExportProfile {
-    let asset = AVURLAsset(url: inputURL)
-    guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
-        throw NSError(domain: "NaisePlus", code: 1, userInfo: [NSLocalizedDescriptionKey: "No video track found"])
-    }
-
-    let sourceSize = try await videoTrack.load(.naturalSize)
-    let sourceTransform = try await videoTrack.load(.preferredTransform)
-    let trackRange = try await videoTrack.load(.timeRange)
-
-    let transformedRect = CGRect(origin: .zero, size: sourceSize).applying(sourceTransform)
-    let orientedSize = CGSize(width: abs(transformedRect.width), height: abs(transformedRect.height))
-    guard orientedSize.width > 0, orientedSize.height > 0 else {
-        throw NSError(domain: "NaisePlus", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid video dimensions"])
-    }
-
-    let compatiblePresets = AVAssetExportSession.exportPresets(compatibleWith: asset)
-    let profile = buildActiveProfile(
-        orientedSize: orientedSize,
-        durationSeconds: durationSeconds,
-        platform: platform,
-        resolution: resolution,
-        targetFPS: targetFPS,
-        compatiblePresets: compatiblePresets
-    )
-
-    let scale = min(1.0, max(profile.outputSize.width, profile.outputSize.height) / max(orientedSize.width, orientedSize.height))
-    let sourceToOutput = sourceTransform
-        .concatenating(CGAffineTransform(translationX: -transformedRect.minX, y: -transformedRect.minY))
-        .concatenating(CGAffineTransform(scaleX: scale, y: scale))
-
-    let engine = NaiseAIEngine()
-    engine.reset()
-
-    NaiseCompositorConfig.shared.configure(
-        engine: engine,
-        sourceToOutputTransform: sourceToOutput,
-        outputSize: profile.outputSize,
-        platform: platform,
-        targetFPS: profile.targetFPS,
-        useOpticalFlow: profile.opticalFlowActive
-    )
-
-    let videoComposition = AVMutableVideoComposition(propertiesOf: asset)
-    videoComposition.renderSize = profile.outputSize
-    videoComposition.frameDuration = CMTime(value: 1, timescale: profile.targetFPS)
-    videoComposition.customVideoCompositorClass = NaiseActiveCompositor.self
-
-    guard let session = AVAssetExportSession(asset: asset, presetName: profile.presetName) else {
-        throw NSError(domain: "NaisePlus", code: 3, userInfo: [NSLocalizedDescriptionKey: "Export session unavailable"])
-    }
-
-    session.outputURL = outputURL
-    session.outputFileType = .mp4
-    session.videoComposition = videoComposition
-    session.shouldOptimizeForNetworkUse = true
-
-    let progressTask = Task {
-        while !Task.isCancelled {
-            onProgress(Double(session.progress))
-            try? await Task.sleep(nanoseconds: 100_000_000)
+    @MainActor
+    private func saveToPhotos() async {
+        guard let url = exportedVideoURL else { return }
+        let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        guard status == .authorized || status == .limited else {
+            exportError = "Allow Photos access (Add Photos only) in Settings to save the video."
+            return
         }
-    }
-    defer { progressTask.cancel() }
-
-    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-        session.exportAsynchronously {
-            switch session.status {
-            case .completed:
-                continuation.resume()
-            case .failed:
-                continuation.resume(throwing: session.error ?? NSError(domain: "NaisePlus", code: 4, userInfo: [NSLocalizedDescriptionKey: "AI export failed"]))
-            case .cancelled:
-                continuation.resume(throwing: NSError(domain: "NaisePlus", code: 5, userInfo: [NSLocalizedDescriptionKey: "AI export cancelled"]))
-            default:
-                continuation.resume(throwing: session.error ?? NSError(domain: "NaisePlus", code: 6, userInfo: [NSLocalizedDescriptionKey: "AI export interrupted"]))
+        do {
+            try await PHPhotoLibrary.shared().performChanges {
+                _ = PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
             }
+            exportError = nil
+            statusTitle = "Saved to Photos"
+            statusDetail = "Open Instagram / TikTok and pick it from your library"
+            appendLog("Saved to Photos")
+        } catch {
+            exportError = error.localizedDescription
+            appendLog("Save to Photos failed")
         }
     }
-
-    return profile
 }
+
+// MARK: - Platform logos
 
 private struct SocialPlatformLogo: View {
     let platform: String
