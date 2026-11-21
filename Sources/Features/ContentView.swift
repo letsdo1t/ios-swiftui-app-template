@@ -452,20 +452,24 @@ struct ContentView: View {
                 }
             )
 
-            renderProgress = 1
+            renderProgress = 0.98
             statusTitle = "Saving to Gallery"
             statusDetail = "Writing \(Int(result.size.width))×\(Int(result.size.height)) @ \(targetFPS)FPS..."
             appendLog("Saving to Gallery")
 
-            let authStatus = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-            guard authStatus == .authorized || authStatus == .limited else {
-                throw NSError(domain: "NaisePlus", code: 5, userInfo: [NSLocalizedDescriptionKey: "Allow Photos access to save to Gallery"])
+            let hasUsageDesc = Bundle.main.object(forInfoDictionaryKey: "NSPhotoLibraryAddUsageDescription") != nil
+            if hasUsageDesc {
+                let authStatus = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+                guard authStatus == .authorized || authStatus == .limited else {
+                    throw NSError(domain: "NaisePlus", code: 5, userInfo: [NSLocalizedDescriptionKey: "Allow Photos access in Settings"])
+                }
             }
 
             try await PHPhotoLibrary.shared().performChanges {
                 PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: outputURL)
             }
 
+            renderProgress = 1
             currentStep = .ready
             statusTitle = "Saved to Gallery"
             statusDetail = "\(Int(result.size.width))×\(Int(result.size.height)) · \(targetFPS)FPS · \(chosenPlatform)"
@@ -634,34 +638,37 @@ private func renderCleanVideoAsync(
         var videoDone = false
         var audioDone = (audioReaderOutput == nil || audioWriterInput == nil)
         var completed = false
+        var finishingWriter = false
 
-        func finishOnce(_ result: Result<Void, Error>) {
+        func failOnce(_ err: Error) {
             stateQueue.async {
                 guard !completed else { return }
                 completed = true
-                switch result {
-                case .success:
-                    continuation.resume()
-                case .failure(let err):
-                    reader.cancelReading()
-                    writer.cancelWriting()
-                    continuation.resume(throwing: err)
-                }
+                reader.cancelReading()
+                writer.cancelWriting()
+                continuation.resume(throwing: err)
             }
         }
 
-        func checkBothStreamsFinished() {
+        func finishWriterIfReady() {
             stateQueue.async {
-                guard videoDone && audioDone && !completed else { return }
+                guard videoDone && audioDone && !completed && !finishingWriter else { return }
+                finishingWriter = true
+
                 if reader.status == .failed {
-                    finishOnce(.failure(reader.error ?? NSError(domain: "NaisePlus", code: 7, userInfo: [NSLocalizedDescriptionKey: "Reader error"])))
+                    failOnce(reader.error ?? NSError(domain: "NaisePlus", code: 7, userInfo: [NSLocalizedDescriptionKey: "Reader error"]))
                     return
                 }
+
                 writer.finishWriting {
-                    if writer.status == .failed {
-                        finishOnce(.failure(writer.error ?? NSError(domain: "NaisePlus", code: 8, userInfo: [NSLocalizedDescriptionKey: "Writer error"])))
-                    } else {
-                        finishOnce(.success(()))
+                    stateQueue.async {
+                        guard !completed else { return }
+                        completed = true
+                        if writer.status == .failed {
+                            continuation.resume(throwing: writer.error ?? NSError(domain: "NaisePlus", code: 8, userInfo: [NSLocalizedDescriptionKey: "Writer error"]))
+                        } else {
+                            continuation.resume()
+                        }
                     }
                 }
             }
@@ -669,8 +676,8 @@ private func renderCleanVideoAsync(
 
         videoWriterInput.requestMediaDataWhenReady(on: videoQueue) {
             while videoWriterInput.isReadyForMoreMediaData {
-                let isFinishedNow = stateQueue.sync { completed }
-                if isFinishedNow {
+                let shouldStop = stateQueue.sync { completed || videoDone }
+                if shouldStop {
                     videoWriterInput.markAsFinished()
                     return
                 }
@@ -679,7 +686,7 @@ private func renderCleanVideoAsync(
                 if CMTimeGetSeconds(targetPTS) >= totalSeconds {
                     videoWriterInput.markAsFinished()
                     stateQueue.sync { videoDone = true }
-                    checkBothStreamsFinished()
+                    finishWriterIfReady()
                     return
                 }
 
@@ -699,7 +706,11 @@ private func renderCleanVideoAsync(
                 }
 
                 if let buffer = latestPixelBuffer {
-                    _ = pixelBufferAdaptor.append(buffer, withPresentationTime: targetPTS)
+                    let appended = pixelBufferAdaptor.append(buffer, withPresentationTime: targetPTS)
+                    if !appended && writer.status == .failed {
+                        failOnce(writer.error ?? NSError(domain: "NaisePlus", code: 9, userInfo: [NSLocalizedDescriptionKey: "Failed appending frame"]))
+                        return
+                    }
                 }
 
                 frameIndex += 1
@@ -711,8 +722,8 @@ private func renderCleanVideoAsync(
         if let aOut = audioReaderOutput, let aIn = audioWriterInput {
             aIn.requestMediaDataWhenReady(on: audioQueue) {
                 while aIn.isReadyForMoreMediaData {
-                    let isFinishedNow = stateQueue.sync { completed }
-                    if isFinishedNow {
+                    let shouldStop = stateQueue.sync { completed || audioDone }
+                    if shouldStop {
                         aIn.markAsFinished()
                         return
                     }
@@ -720,13 +731,13 @@ private func renderCleanVideoAsync(
                         if !aIn.append(sample) {
                             aIn.markAsFinished()
                             stateQueue.sync { audioDone = true }
-                            checkBothStreamsFinished()
+                            finishWriterIfReady()
                             return
                         }
                     } else {
                         aIn.markAsFinished()
                         stateQueue.sync { audioDone = true }
-                        checkBothStreamsFinished()
+                        finishWriterIfReady()
                         return
                     }
                 }
