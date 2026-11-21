@@ -1,14 +1,33 @@
 import SwiftUI
 import PhotosUI
 import AVFoundation
+import Photos
 import UniformTypeIdentifiers
+
+private enum EnhanceStep: String, CaseIterable, Identifiable {
+    case importClip = "Import"
+    case profile = "Profile"
+    case render = "Render"
+    case ready = "Ready"
+    var id: String { rawValue }
+}
+
+private struct StatusLogEntry: Identifiable {
+    let id = UUID()
+    let timeText: String
+    let message: String
+}
 
 struct ContentView: View {
     @State private var isLightMode = false
     @State private var selectedVideo: PhotosPickerItem?
     @State private var videoURL: URL?
-    @State private var exportedVideoURL: URL?
-    @State private var videoName = "Ready to import"
+    @State private var statusTitle = "Ready to import"
+    @State private var statusDetail = "Select a clean clip for Story / Reels"
+    @State private var currentStep: EnhanceStep = .importClip
+    @State private var logs: [StatusLogEntry] = [
+        StatusLogEntry(timeText: "NOW", message: "Auto-save to Gallery ready")
+    ]
     @State private var isProcessing = false
     @State private var exportError: String?
     @State private var platform = "Instagram"
@@ -42,30 +61,18 @@ struct ContentView: View {
     var body: some View {
         GeometryReader { geometry in
             VStack(spacing: 0) {
-                header.padding(.top, 12)
-                importArea.padding(.top, 18)
-                status.padding(.top, 10)
-                settingsPanel.padding(.top, 16)
-                Spacer(minLength: 12)
+                header.padding(.top, 10)
+                importArea.padding(.top, 14)
+                clearStatusCard.padding(.top, 10)
+                settingsPanel.padding(.top, 12)
+                Spacer(minLength: 10)
                 exportButton
 
-                if let exportedVideoURL {
-                    ShareLink(item: exportedVideoURL, preview: SharePreview("Naise+ Video")) {
-                        Label("Share / Save Video", systemImage: "square.and.arrow.up")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(activeAccent)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 12)
-                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
-                            .overlay(RoundedRectangle(cornerRadius: 14).stroke(cyanAccent.opacity(0.45), lineWidth: 1))
-                    }
-                    .padding(.top, 10)
-                }
                 if let exportError {
                     Text(exportError)
                         .font(.caption2)
                         .foregroundStyle(.red)
-                        .lineLimit(3)
+                        .lineLimit(2)
                         .multilineTextAlignment(.center)
                         .padding(.top, 6)
                 }
@@ -76,7 +83,13 @@ struct ContentView: View {
             .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
             .background {
                 ZStack {
-                    LinearGradient(colors: isLightMode ? [lightBgTop, lightBgMid, lightBgBottom] : [darkBgTop, darkBgMid, darkBgBottom], startPoint: .topLeading, endPoint: .bottomTrailing)
+                    LinearGradient(
+                        colors: isLightMode
+                            ? [lightBgTop, lightBgMid, lightBgBottom]
+                            : [darkBgTop, darkBgMid, darkBgBottom],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
                     Circle().fill(cyanAccent.opacity(isLightMode ? 0.22 : 0.16)).frame(width: 280, height: 280).blur(radius: 70).offset(x: -110, y: -260)
                     Circle().fill(indigoAccent.opacity(isLightMode ? 0.16 : 0.14)).frame(width: 260, height: 260).blur(radius: 75).offset(x: 130, y: 180)
                 }
@@ -89,9 +102,9 @@ struct ContentView: View {
 
     private var header: some View {
         HStack {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Naise+").font(.system(size: 28, weight: .bold, design: .rounded))
-                Text("AI Video Enhancer").font(.system(size: 13)).foregroundStyle(mutedText)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Naise+").font(.system(size: 27, weight: .bold, design: .rounded))
+                Text("AI Video Enhancer").font(.system(size: 12)).foregroundStyle(mutedText)
             }
             Spacer()
             HStack(spacing: 4) {
@@ -110,9 +123,9 @@ struct ContentView: View {
             withAnimation(.snappy(duration: 0.22)) { isLightMode = lightTarget }
         } label: {
             Image(systemName: icon)
-                .font(.system(size: 14, weight: .semibold))
+                .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(isSelected ? activeAccent : mutedText)
-                .frame(width: 34, height: 34)
+                .frame(width: 32, height: 32)
                 .background(isSelected ? cyanAccent.opacity(0.2) : Color.clear, in: Circle())
         }
         .buttonStyle(.plain)
@@ -120,23 +133,28 @@ struct ContentView: View {
 
     private var importArea: some View {
         PhotosPicker(selection: $selectedVideo, matching: .videos) {
-            VStack(spacing: 10) {
+            VStack(spacing: 8) {
                 Image(systemName: videoURL == nil ? "plus" : "checkmark")
-                    .font(.system(size: 22, weight: .semibold))
+                    .font(.system(size: 20, weight: .semibold))
                     .foregroundStyle(activeAccent)
-                    .frame(width: 46, height: 46)
+                    .frame(width: 42, height: 42)
                     .background(cyanAccent.opacity(0.18), in: Circle())
                 Text(videoURL == nil ? "Import Video" : "Change Video")
-                    .font(.system(size: 17, weight: .semibold))
+                    .font(.system(size: 16, weight: .semibold))
                 Text(videoURL == nil ? "Select from Photos library" : "Tap to replace current clip")
-                    .font(.system(size: 12)).foregroundStyle(mutedText)
+                    .font(.system(size: 11)).foregroundStyle(mutedText)
             }
             .frame(maxWidth: .infinity)
-            .frame(height: 152)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22))
+            .frame(height: 134)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
             .overlay {
-                RoundedRectangle(cornerRadius: 22)
-                    .stroke(videoURL == nil ? (isLightMode ? Color.black.opacity(0.14) : Color.white.opacity(0.24)) : cyanAccent.opacity(0.75), style: StrokeStyle(lineWidth: 1.4, dash: videoURL == nil ? [6, 5] : []))
+                RoundedRectangle(cornerRadius: 20)
+                    .stroke(
+                        videoURL == nil
+                            ? (isLightMode ? Color.black.opacity(0.14) : Color.white.opacity(0.24))
+                            : cyanAccent.opacity(0.75),
+                        style: StrokeStyle(lineWidth: 1.4, dash: videoURL == nil ? [6, 5] : [])
+                    )
             }
         }
         .onChange(of: selectedVideo) { _, item in
@@ -144,29 +162,79 @@ struct ContentView: View {
         }
     }
 
-    private var status: some View {
-        HStack(spacing: 7) {
-            Circle().fill(videoURL == nil ? mutedText : activeAccent).frame(width: 7, height: 7)
-            Text(videoName)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(videoURL == nil ? mutedText : activeAccent)
+    private var clearStatusCard: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(exportError != nil ? Color.red : (isProcessing || videoURL != nil ? activeAccent : mutedText))
+                    .frame(width: 7, height: 7)
+                Text(statusTitle)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(exportError != nil ? Color.red : (videoURL == nil ? mutedText : activeAccent))
+                    .lineLimit(1)
+                Spacer()
+                Text("\(platform) · \(resolution) · \(fps)")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(mutedText)
+                    .lineLimit(1)
+            }
+
+            HStack(spacing: 5) {
+                ForEach(EnhanceStep.allCases) { step in
+                    let idx = EnhanceStep.allCases.firstIndex(of: step) ?? 0
+                    let activeIdx = EnhanceStep.allCases.firstIndex(of: currentStep) ?? 0
+                    let done = idx <= activeIdx && (videoURL != nil || step == .importClip)
+                    VStack(spacing: 4) {
+                        Capsule()
+                            .fill(done ? activeAccent : glassBorder)
+                            .frame(height: 3)
+                        Text(step.rawValue.uppercased())
+                            .font(.system(size: 9, weight: .bold))
+                            .tracking(0.5)
+                            .foregroundStyle(done ? activeAccent : mutedText)
+                    }
+                }
+            }
+
+            Text(statusDetail)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(mutedText)
                 .lineLimit(1)
+
+            if let latestLog = logs.last {
+                HStack(spacing: 6) {
+                    Text(latestLog.timeText)
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(activeAccent)
+                    Text(latestLog.message)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(mutedText)
+                        .lineLimit(1)
+                }
+            }
         }
-        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 13)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(glassBorder, lineWidth: 1))
     }
 
     private var settingsPanel: some View {
-        VStack(spacing: 13) {
+        VStack(spacing: 11) {
             sectionHeading("PLATFORM", detail: platform, highlight: true)
             HStack(spacing: 6) {
                 ForEach(platforms, id: \.self) { name in
                     let isSelected = platform == name
                     Button {
-                        withAnimation(.snappy(duration: 0.2)) { platform = name }
+                        withAnimation(.snappy(duration: 0.2)) {
+                            platform = name
+                            appendLog("Target: \(name) Story/Reels")
+                        }
                     } label: {
                         SocialPlatformLogo(platform: name)
                             .frame(maxWidth: .infinity)
-                            .frame(height: 38)
+                            .frame(height: 35)
                             .foregroundStyle(isSelected ? activeAccent : mutedText)
                             .background(isSelected ? cyanAccent.opacity(0.2) : Color.clear)
                             .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -177,17 +245,19 @@ struct ContentView: View {
                 }
             }
             .padding(4)
-            .background(segmentWell, in: RoundedRectangle(cornerRadius: 14))
+            .background(segmentWell, in: RoundedRectangle(cornerRadius: 13))
+
             Divider().overlay(glassBorder)
             sectionHeading("RESOLUTION", detail: resolutionDetail)
-            choiceRow(resolutions, selection: $resolution)
+            choiceRow(resolutions, selection: $resolution, labelPrefix: "Res")
+
             Divider().overlay(glassBorder)
             sectionHeading("FRAME RATE", detail: fps == "60 FPS" ? "Smooth" : "Standard")
-            choiceRow(rates, selection: $fps)
+            choiceRow(rates, selection: $fps, labelPrefix: "FPS")
         }
-        .padding(14)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22))
-        .overlay(RoundedRectangle(cornerRadius: 22).stroke(glassBorder, lineWidth: 1))
+        .padding(13)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
+        .overlay(RoundedRectangle(cornerRadius: 20).stroke(glassBorder, lineWidth: 1))
     }
 
     private var resolutionDetail: String {
@@ -200,23 +270,29 @@ struct ContentView: View {
 
     private func sectionHeading(_ title: String, detail: String, highlight: Bool = false) -> some View {
         HStack {
-            Text(title).font(.system(size: 11, weight: .semibold)).tracking(1.2).foregroundStyle(mutedText)
+            Text(title).font(.system(size: 10, weight: .semibold)).tracking(1.2).foregroundStyle(mutedText)
             Spacer()
-            Text(detail).font(.system(size: 12, weight: .semibold)).foregroundStyle(highlight ? activeAccent : mutedText)
+            Text(detail).font(.system(size: 11, weight: .semibold)).foregroundStyle(highlight ? activeAccent : mutedText)
         }
     }
 
-    private func choiceRow(_ options: [String], selection: Binding<String>) -> some View {
+    private func choiceRow(_ options: [String], selection: Binding<String>, labelPrefix: String) -> some View {
         HStack(spacing: 5) {
             ForEach(options, id: \.self) { option in
                 let isSelected = selection.wrappedValue == option
                 Button {
-                    withAnimation(.snappy(duration: 0.2)) { selection.wrappedValue = option }
+                    withAnimation(.snappy(duration: 0.2)) {
+                        selection.wrappedValue = option
+                        if videoURL != nil && !isProcessing {
+                            statusDetail = "Keep clean source · \(resolution) · \(fps)"
+                        }
+                        appendLog("\(labelPrefix): \(option)")
+                    }
                 } label: {
                     Text(option)
                         .font(.system(size: 13, weight: .semibold))
                         .frame(maxWidth: .infinity)
-                        .frame(height: 38)
+                        .frame(height: 35)
                         .foregroundStyle(isSelected ? activeAccent : mutedText)
                         .background(isSelected ? cyanAccent.opacity(0.2) : Color.clear)
                         .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -226,7 +302,7 @@ struct ContentView: View {
             }
         }
         .padding(4)
-        .background(segmentWell, in: RoundedRectangle(cornerRadius: 14))
+        .background(segmentWell, in: RoundedRectangle(cornerRadius: 13))
     }
 
     private var exportButton: some View {
@@ -237,18 +313,27 @@ struct ContentView: View {
                 if isProcessing {
                     ProgressView().tint(.white)
                 } else {
-                    Image(systemName: "sparkles").font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)
+                    Image(systemName: "sparkles").font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
                 }
-                Text(isProcessing ? "Processing Video..." : "Enhance & Export").foregroundStyle(.white)
+                Text(isProcessing ? "Saving to Gallery..." : "Enhance & Export").foregroundStyle(.white)
             }
-            .font(.system(size: 16, weight: .bold))
+            .font(.system(size: 15, weight: .bold))
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 15)
+            .padding(.vertical, 14)
             .background(LinearGradient(colors: [cyanAccent, indigoAccent], startPoint: .leading, endPoint: .trailing))
             .clipShape(Capsule())
         }
         .disabled(videoURL == nil || isProcessing)
         .opacity(videoURL == nil || isProcessing ? 0.55 : 1)
+    }
+
+    private func appendLog(_ message: String) {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        logs.append(StatusLogEntry(timeText: formatter.string(from: Date()), message: message))
+        if logs.count > 12 {
+            logs.removeFirst(logs.count - 12)
+        }
     }
 
     private func cleanupTempFile(_ url: URL?) {
@@ -259,20 +344,27 @@ struct ContentView: View {
     @MainActor
     private func loadVideo(_ item: PhotosPickerItem?) async {
         cleanupTempFile(videoURL)
-        cleanupTempFile(exportedVideoURL)
         videoURL = nil
-        exportedVideoURL = nil
         exportError = nil
 
         guard let item else {
-            videoName = "Ready to import"
+            currentStep = .importClip
+            statusTitle = "Ready to import"
+            statusDetail = "Select a clean clip for Story / Reels"
+            appendLog("Cleared clip")
             return
         }
-        videoName = "Loading video..."
+
+        currentStep = .importClip
+        statusTitle = "Importing clip"
+        statusDetail = "Loading video from Photos..."
+        appendLog("Importing clip")
 
         do {
             guard let data = try await item.loadTransferable(type: Data.self) else {
-                videoName = "Unable to load video"
+                statusTitle = "Import unavailable"
+                statusDetail = "Could not read video data"
+                appendLog("Empty video data")
                 return
             }
             let url = FileManager.default.temporaryDirectory
@@ -280,26 +372,38 @@ struct ContentView: View {
                 .appendingPathExtension("mov")
             try data.write(to: url, options: .atomic)
             videoURL = url
-            videoName = "Video imported · \(resolution) · \(fps)"
+            currentStep = .profile
+            statusTitle = "Clean source ready"
+            statusDetail = "\(platform) · \(resolution) · \(fps)"
+            appendLog("Clip loaded")
         } catch {
             exportError = error.localizedDescription
-            videoName = "Import failed"
+            statusTitle = "Import failed"
+            statusDetail = "Try another clip"
+            appendLog("Import error")
         }
     }
 
     @MainActor
     private func exportVideo() async {
         guard let videoURL else {
-            videoName = "Please import a video"
+            statusTitle = "No clip selected"
+            statusDetail = "Import a video first"
             return
         }
 
-        cleanupTempFile(exportedVideoURL)
         isProcessing = true
         exportError = nil
-        exportedVideoURL = nil
-        videoName = "Processing \(resolution) (\(fps))..."
-        defer { isProcessing = false }
+        currentStep = .render
+        statusTitle = "Rendering clean master"
+        statusDetail = "Preserving clarity · \(resolution) · \(fps)"
+        appendLog("Exporting \(resolution) @ \(fps)")
+
+        var tempOutputURL: URL?
+        defer {
+            cleanupTempFile(tempOutputURL)
+            isProcessing = false
+        }
 
         do {
             let asset = AVURLAsset(url: videoURL)
@@ -320,7 +424,7 @@ struct ContentView: View {
             switch resolution {
             case "720p": maxSide = 1280
             case "1080p": maxSide = 1920
-            default: maxSide = 3840
+            default: maxSide = 2160
             }
 
             let scale = min(1.0, maxSide / max(orientedSize.width, orientedSize.height))
@@ -347,13 +451,17 @@ struct ContentView: View {
                 }
             }
 
-            let videoComposition = AVMutableVideoComposition()
+            let videoComposition = AVMutableVideoComposition(
+                asset: composition,
+                applyingCIFiltersWithHandler: { request in
+                    request.finish(with: request.sourceImage, context: nil)
+                }
+            )
             videoComposition.renderSize = outputSize
             videoComposition.frameDuration = CMTime(value: 1, timescale: fps == "60 FPS" ? 60 : 30)
 
             let instruction = AVMutableVideoCompositionInstruction()
             instruction.timeRange = CMTimeRange(start: .zero, duration: clipDuration)
-
             let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: compositionTrack)
             let normalized = sourceTransform.concatenating(
                 CGAffineTransform(translationX: -transformedRect.minX, y: -transformedRect.minY)
@@ -371,13 +479,33 @@ struct ContentView: View {
             let outputURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("NaisePlus_\(UUID().uuidString)")
                 .appendingPathExtension("mp4")
+            tempOutputURL = outputURL
 
             try await session.export(to: outputURL, as: .mp4)
-            exportedVideoURL = outputURL
-            videoName = "Exported for \(platform) · \(resolution) · \(fps)"
+
+            statusTitle = "Saving to Gallery"
+            statusDetail = "Writing video to Photos..."
+            appendLog("Saving to Gallery")
+
+            let authStatus = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+            guard authStatus == .authorized || authStatus == .limited else {
+                throw NSError(domain: "NaisePlus", code: 5, userInfo: [NSLocalizedDescriptionKey: "Allow Photos access to save to Gallery"])
+            }
+
+            try await PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: outputURL)
+            }
+
+            currentStep = .ready
+            statusTitle = "Saved to Gallery"
+            statusDetail = "\(Int(outputSize.width))×\(Int(outputSize.height)) · \(fps) · Ready to post"
+            appendLog("Saved to Gallery · \(Int(outputSize.width))×\(Int(outputSize.height))")
         } catch {
             exportError = error.localizedDescription
-            videoName = "Export failed"
+            currentStep = .profile
+            statusTitle = "Export failed"
+            statusDetail = "Adjust settings and retry"
+            appendLog("Export/save failed")
         }
     }
 }
