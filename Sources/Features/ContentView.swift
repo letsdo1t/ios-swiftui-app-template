@@ -1,6 +1,8 @@
 import SwiftUI
 import PhotosUI
 import AVFoundation
+import CoreImage
+import Vision
 import UniformTypeIdentifiers
 
 private enum EnhanceStep: String, CaseIterable, Identifiable {
@@ -34,6 +36,7 @@ private struct ExportProfile {
     let targetFPS: Int32
     let presetName: String
     let bitrateMbps: Double
+    let opticalFlowActive: Bool
 }
 
 private struct ExportedVideoDocument: FileDocument {
@@ -55,6 +58,236 @@ private struct ExportedVideoDocument: FileDocument {
     }
 }
 
+private final class NaiseAIEngine {
+    private let ciContext: CIContext
+    private var previousBuffer: CVPixelBuffer?
+    private var lastFlowOverlay: CIImage?
+    private var frameCounter: Int = 0
+
+    init() {
+        if let metalDevice = MTLCreateSystemDefaultDevice() {
+            self.ciContext = CIContext(mtlDevice: metalDevice, options: [
+                .cacheIntermediates: true,
+                .name: "NaisePlusMetalContext"
+            ])
+        } else {
+            self.ciContext = CIContext(options: [.useSoftwareRenderer: false])
+        }
+    }
+
+    func reset() {
+        previousBuffer = nil
+        lastFlowOverlay = nil
+        frameCounter = 0
+    }
+
+    func renderFrame(
+        sourceBuffer: CVPixelBuffer,
+        to destinationBuffer: CVPixelBuffer,
+        sourceToOutputTransform: CGAffineTransform,
+        outputSize: CGSize,
+        platform: String,
+        targetFPS: Int32,
+        useOpticalFlow: Bool
+    ) {
+        autoreleasepool {
+            let outputRect = CGRect(origin: .zero, size: outputSize)
+            var image = CIImage(cvPixelBuffer: sourceBuffer)
+                .transformed(by: sourceToOutputTransform)
+                .cropped(to: outputRect)
+
+            frameCounter += 1
+
+            if useOpticalFlow, targetFPS == 60 {
+                if let prev = previousBuffer, frameCounter % 2 == 0 {
+                    if let computed = computeMotionFlowOverlay(from: prev, to: sourceBuffer, outputSize: outputSize) {
+                        lastFlowOverlay = computed
+                    }
+                }
+                if let flowOverlay = lastFlowOverlay {
+                    image = flowOverlay.composited(over: image).cropped(to: outputRect)
+                }
+            }
+            previousBuffer = sourceBuffer
+
+            if let sharpen = CIFilter(name: "CISharpenLuminance") {
+                sharpen.setValue(image, forKey: kCIInputImageKey)
+                let sharpness: Double = switch platform {
+                case "WhatsApp": 0.36
+                case "TikTok", "Instagram": 0.28
+                default: 0.24
+                }
+                sharpen.setValue(sharpness, forKey: kCIInputSharpnessKey)
+                if let out = sharpen.outputImage {
+                    image = out.cropped(to: outputRect)
+                }
+            }
+
+            if let colorControls = CIFilter(name: "CIColorControls") {
+                colorControls.setValue(image, forKey: kCIInputImageKey)
+                colorControls.setValue(1.04, forKey: kCIInputContrastKey)
+                colorControls.setValue(1.03, forKey: kCIInputSaturationKey)
+                colorControls.setValue(0.0, forKey: kCIInputBrightnessKey)
+                if let out = colorControls.outputImage {
+                    image = out.cropped(to: outputRect)
+                }
+            }
+
+            if let denoise = CIFilter(name: "CINoiseReduction") {
+                denoise.setValue(image, forKey: kCIInputImageKey)
+                denoise.setValue(0.015, forKey: "inputNoiseLevel")
+                denoise.setValue(0.35, forKey: "inputSharpness")
+                if let out = denoise.outputImage {
+                    image = out.cropped(to: outputRect)
+                }
+            }
+
+            ciContext.render(image, to: destinationBuffer, bounds: outputRect, colorSpace: CGColorSpaceCreateDeviceRGB())
+        }
+    }
+
+    private func computeMotionFlowOverlay(
+        from prevBuffer: CVPixelBuffer,
+        to currentBuffer: CVPixelBuffer,
+        outputSize: CGSize
+    ) -> CIImage? {
+        let request = VNGenerateOpticalFlowRequest(
+            targetedCVPixelBuffer: currentBuffer,
+            options: [:]
+        )
+        request.computationAccuracy = .low
+
+        let handler = VNImageRequestHandler(cvPixelBuffer: prevBuffer, options: [:])
+        do {
+            try handler.perform([request])
+            guard let flowObservation = request.results?.first as? VNPixelBufferObservation else {
+                return lastFlowOverlay
+            }
+            let flowCI = CIImage(cvPixelBuffer: flowObservation.pixelBuffer)
+            let sx = outputSize.width / max(1, flowCI.extent.width)
+            let sy = outputSize.height / max(1, flowCI.extent.height)
+            let scaledFlow = flowCI.transformed(by: CGAffineTransform(scaleX: sx, y: sy))
+
+            if let opacityFilter = CIFilter(name: "CIOpacity") {
+                opacityFilter.setValue(scaledFlow, forKey: kCIInputImageKey)
+                opacityFilter.setValue(0.12, forKey: "inputOpacity")
+                return opacityFilter.outputImage?.cropped(to: CGRect(origin: .zero, size: outputSize))
+            }
+        } catch {
+            return lastFlowOverlay
+        }
+        return lastFlowOverlay
+    }
+}
+
+private final class NaiseCompositorConfig: @unchecked Sendable {
+    static let shared = NaiseCompositorConfig()
+
+    private let lock = NSLock()
+    private var engine = NaiseAIEngine()
+    private var sourceToOutputTransform = CGAffineTransform.identity
+    private var outputSize = CGSize(width: 1080, height: 1920)
+    private var platform = "Instagram"
+    private var targetFPS: Int32 = 60
+    private var useOpticalFlow = false
+
+    func configure(
+        engine: NaiseAIEngine,
+        sourceToOutputTransform: CGAffineTransform,
+        outputSize: CGSize,
+        platform: String,
+        targetFPS: Int32,
+        useOpticalFlow: Bool
+    ) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.engine = engine
+        self.sourceToOutputTransform = sourceToOutputTransform
+        self.outputSize = outputSize
+        self.platform = platform
+        self.targetFPS = targetFPS
+        self.useOpticalFlow = useOpticalFlow
+    }
+
+    func current() -> (NaiseAIEngine, CGAffineTransform, CGSize, String, Int32, Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (engine, sourceToOutputTransform, outputSize, platform, targetFPS, useOpticalFlow)
+    }
+}
+
+private final class NaiseActiveCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
+    private let queue = DispatchQueue(label: "naise.plus.active.compositor", qos: .userInitiated)
+    private var cancelled = false
+
+    var sourcePixelBufferAttributes: [String: Any]? {
+        [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferMetalCompatibilityKey as String: true
+        ]
+    }
+
+    var requiredPixelBufferAttributesForRenderContext: [String: Any] {
+        [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferMetalCompatibilityKey as String: true
+        ]
+    }
+
+    func renderContextChanged(_ newRenderContext: AVVideoCompositionRenderContext) {
+        queue.async {
+            self.cancelled = false
+        }
+    }
+
+    func startRequest(_ asyncVideoCompositionRequest: AVAsynchronousVideoCompositionRequest) {
+        queue.async {
+            if self.cancelled {
+                asyncVideoCompositionRequest.finishCancelledRequest()
+                return
+            }
+
+            guard let trackID = asyncVideoCompositionRequest.sourceTrackIDs.first?.int32Value,
+                  let srcBuffer = asyncVideoCompositionRequest.sourceFrame(byTrackID: trackID) else {
+                asyncVideoCompositionRequest.finish(with: NSError(
+                    domain: "NaisePlus",
+                    code: 20,
+                    userInfo: [NSLocalizedDescriptionKey: "Source frame unavailable"]
+                ))
+                return
+            }
+
+            guard let dstBuffer = asyncVideoCompositionRequest.renderContext.newPixelBuffer() else {
+                asyncVideoCompositionRequest.finish(with: NSError(
+                    domain: "NaisePlus",
+                    code: 21,
+                    userInfo: [NSLocalizedDescriptionKey: "Destination buffer unavailable"]
+                ))
+                return
+            }
+
+            let (engine, transform, outSize, platform, fps, useFlow) = NaiseCompositorConfig.shared.current()
+            engine.renderFrame(
+                sourceBuffer: srcBuffer,
+                to: dstBuffer,
+                sourceToOutputTransform: transform,
+                outputSize: outSize,
+                platform: platform,
+                targetFPS: fps,
+                useOpticalFlow: useFlow
+            )
+
+            asyncVideoCompositionRequest.finish(withComposedVideoFrame: dstBuffer)
+        }
+    }
+
+    func cancelAllPendingVideoCompositionRequests() {
+        queue.async {
+            self.cancelled = true
+        }
+    }
+}
+
 struct ContentView: View {
     @State private var isLightMode = false
     @State private var selectedVideo: PhotosPickerItem?
@@ -67,7 +300,7 @@ struct ContentView: View {
     @State private var currentStep: EnhanceStep = .importClip
     @State private var renderProgress: Double = 0
     @State private var logs: [StatusLogEntry] = [
-        StatusLogEntry(timeText: "NOW", message: "Naise+ pro export engine ready")
+        StatusLogEntry(timeText: "NOW", message: "Naise+ active AI engine ready")
     ]
     @State private var isProcessing = false
     @State private var exportError: String?
@@ -371,7 +604,7 @@ struct ContentView: View {
                     withAnimation(.snappy(duration: 0.2)) {
                         selection.wrappedValue = option
                         if videoURL != nil && !isProcessing {
-                            statusDetail = "Clean source · \(resolution) · \(fps)"
+                            statusDetail = "Metal AI + Vision · \(resolution) · \(fps)"
                         }
                         appendLog("\(labelPrefix): \(option)")
                     }
@@ -402,7 +635,7 @@ struct ContentView: View {
                 } else {
                     Image(systemName: "sparkles").font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
                 }
-                Text(isProcessing ? "Rendering \(fps)..." : "Enhance & Export").foregroundStyle(.white)
+                Text(isProcessing ? "AI Enhancing \(fps)..." : "Enhance & Export").foregroundStyle(.white)
             }
             .font(.system(size: 15, weight: .bold))
             .frame(maxWidth: .infinity)
@@ -503,13 +736,14 @@ struct ContentView: View {
         exportError = nil
         renderProgress = 0
         currentStep = .render
-        statusTitle = "Rendering \(fps)"
-        statusDetail = "Optimizing for \(platform) (\(resolution))..."
-        appendLog("Rendering \(resolution) @ \(fps) for \(platform)")
+        statusTitle = "AI Engine Active (\(fps))"
+        statusDetail = "Metal clarity + Vision flow (\(resolution))..."
+        appendLog("Active AI \(resolution) @ \(fps) (\(platform))")
 
         let targetFPS: Int32 = fps == "60 FPS" ? 60 : 30
         let chosenResolution = resolution
         let chosenPlatform = platform
+        let clipDuration = sourceInfo?.durationSeconds ?? 10.0
 
         defer {
             isProcessing = false
@@ -517,15 +751,16 @@ struct ContentView: View {
 
         do {
             let outputURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("NaisePlus_\(UUID().uuidString)")
+                .appendingPathComponent("NaisePlus_Pro_\(UUID().uuidString)")
                 .appendingPathExtension("mp4")
 
-            let profile = try await runPaduExport(
+            let profile = try await runActiveAIEngineExport(
                 inputURL: videoURL,
                 outputURL: outputURL,
                 platform: chosenPlatform,
                 resolution: chosenResolution,
                 targetFPS: targetFPS,
+                durationSeconds: clipDuration,
                 onProgress: { p in
                     Task { @MainActor in
                         renderProgress = min(1.0, max(0.0, p))
@@ -536,9 +771,9 @@ struct ContentView: View {
             exportedVideoURL = outputURL
             renderProgress = 1.0
             currentStep = .ready
-            statusTitle = "Export ready"
-            statusDetail = "\(Int(profile.outputSize.width))×\(Int(profile.outputSize.height)) · \(profile.targetFPS)FPS · \(String(format: "%.1f", profile.bitrateMbps))Mbps"
-            appendLog("Ready · Tap Save to Files")
+            statusTitle = "AI Export ready"
+            statusDetail = "\(Int(profile.outputSize.width))×\(Int(profile.outputSize.height)) · \(profile.targetFPS)FPS · Tap Save to Files"
+            appendLog("Ready · \(profile.opticalFlowActive ? "Flow+Metal" : "Metal") · Save to Files")
         } catch {
             exportError = error.localizedDescription
             currentStep = .profile
@@ -549,8 +784,9 @@ struct ContentView: View {
     }
 }
 
-private func buildExportProfile(
+private func buildActiveProfile(
     orientedSize: CGSize,
+    durationSeconds: Double,
     platform: String,
     resolution: String,
     targetFPS: Int32,
@@ -570,16 +806,7 @@ private func buildExportProfile(
         basePreset = AVAssetExportPresetHighestQuality
     }
 
-    let platformCap: CGFloat
-    switch platform {
-    case "WhatsApp":
-        platformCap = min(maxSide, 1280)
-    case "Instagram", "TikTok", "Facebook":
-        platformCap = maxSide
-    default:
-        platformCap = maxSide
-    }
-
+    let platformCap: CGFloat = platform == "WhatsApp" ? min(maxSide, 1280) : maxSide
     let scale = min(1.0, platformCap / max(orientedSize.width, orientedSize.height))
     let outputSize = CGSize(
         width: max(2, floor(orientedSize.width * scale / 2) * 2),
@@ -605,20 +832,24 @@ private func buildExportProfile(
         chosenPreset = compatiblePresets.first ?? AVAssetExportPresetMediumQuality
     }
 
+    let opticalFlowActive = targetFPS == 60 && durationSeconds <= 45.0 && max(outputSize.width, outputSize.height) <= 1920
+
     return ExportProfile(
         outputSize: outputSize,
         targetFPS: targetFPS,
         presetName: chosenPreset,
-        bitrateMbps: bitrateMbps
+        bitrateMbps: bitrateMbps,
+        opticalFlowActive: opticalFlowActive
     )
 }
 
-private func runPaduExport(
+private func runActiveAIEngineExport(
     inputURL: URL,
     outputURL: URL,
     platform: String,
     resolution: String,
     targetFPS: Int32,
+    durationSeconds: Double,
     onProgress: @escaping (Double) -> Void
 ) async throws -> ExportProfile {
     let asset = AVURLAsset(url: inputURL)
@@ -637,31 +868,36 @@ private func runPaduExport(
     }
 
     let compatiblePresets = AVAssetExportSession.exportPresets(compatibleWith: asset)
-    let profile = buildExportProfile(
+    let profile = buildActiveProfile(
         orientedSize: orientedSize,
+        durationSeconds: durationSeconds,
         platform: platform,
         resolution: resolution,
         targetFPS: targetFPS,
         compatiblePresets: compatiblePresets
     )
 
-    let composition = AVMutableVideoComposition()
-    composition.renderSize = profile.outputSize
-    composition.frameDuration = CMTime(value: 1, timescale: profile.targetFPS)
-
-    let instruction = AVMutableVideoCompositionInstruction()
-    instruction.timeRange = CMTimeRange(start: .zero, duration: trackRange.duration)
-
-    let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: videoTrack)
     let scale = min(1.0, max(profile.outputSize.width, profile.outputSize.height) / max(orientedSize.width, orientedSize.height))
-    let normalized = sourceTransform.concatenating(
-        CGAffineTransform(translationX: -transformedRect.minX, y: -transformedRect.minY)
-    )
-    let scaled = normalized.concatenating(CGAffineTransform(scaleX: scale, y: scale))
-    layerInstruction.setTransform(scaled, at: .zero)
+    let sourceToOutput = sourceTransform
+        .concatenating(CGAffineTransform(translationX: -transformedRect.minX, y: -transformedRect.minY))
+        .concatenating(CGAffineTransform(scaleX: scale, y: scale))
 
-    instruction.layerInstructions = [layerInstruction]
-    composition.instructions = [instruction]
+    let engine = NaiseAIEngine()
+    engine.reset()
+
+    NaiseCompositorConfig.shared.configure(
+        engine: engine,
+        sourceToOutputTransform: sourceToOutput,
+        outputSize: profile.outputSize,
+        platform: platform,
+        targetFPS: profile.targetFPS,
+        useOpticalFlow: profile.opticalFlowActive
+    )
+
+    let videoComposition = AVMutableVideoComposition(propertiesOf: asset)
+    videoComposition.renderSize = profile.outputSize
+    videoComposition.frameDuration = CMTime(value: 1, timescale: profile.targetFPS)
+    videoComposition.customVideoCompositorClass = NaiseActiveCompositor.self
 
     guard let session = AVAssetExportSession(asset: asset, presetName: profile.presetName) else {
         throw NSError(domain: "NaisePlus", code: 3, userInfo: [NSLocalizedDescriptionKey: "Export session unavailable"])
@@ -669,7 +905,7 @@ private func runPaduExport(
 
     session.outputURL = outputURL
     session.outputFileType = .mp4
-    session.videoComposition = composition
+    session.videoComposition = videoComposition
     session.shouldOptimizeForNetworkUse = true
 
     let progressTask = Task {
@@ -686,11 +922,11 @@ private func runPaduExport(
             case .completed:
                 continuation.resume()
             case .failed:
-                continuation.resume(throwing: session.error ?? NSError(domain: "NaisePlus", code: 4, userInfo: [NSLocalizedDescriptionKey: "Export failed"]))
+                continuation.resume(throwing: session.error ?? NSError(domain: "NaisePlus", code: 4, userInfo: [NSLocalizedDescriptionKey: "AI export failed"]))
             case .cancelled:
-                continuation.resume(throwing: NSError(domain: "NaisePlus", code: 5, userInfo: [NSLocalizedDescriptionKey: "Export cancelled"]))
+                continuation.resume(throwing: NSError(domain: "NaisePlus", code: 5, userInfo: [NSLocalizedDescriptionKey: "AI export cancelled"]))
             default:
-                continuation.resume(throwing: session.error ?? NSError(domain: "NaisePlus", code: 6, userInfo: [NSLocalizedDescriptionKey: "Export interrupted"]))
+                continuation.resume(throwing: session.error ?? NSError(domain: "NaisePlus", code: 6, userInfo: [NSLocalizedDescriptionKey: "AI export interrupted"]))
             }
         }
     }
