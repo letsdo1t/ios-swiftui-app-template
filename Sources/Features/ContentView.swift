@@ -1,7 +1,6 @@
 import SwiftUI
 import PhotosUI
 import AVFoundation
-import CoreVideo
 import UniformTypeIdentifiers
 
 private enum EnhanceStep: String, CaseIterable, Identifiable {
@@ -30,9 +29,11 @@ private struct SourceClipInfo {
     }
 }
 
-private struct RenderResult {
-    let size: CGSize
-    let writtenFrames: Int64
+private struct ExportProfile {
+    let outputSize: CGSize
+    let targetFPS: Int32
+    let presetName: String
+    let bitrateMbps: Double
 }
 
 private struct ExportedVideoDocument: FileDocument {
@@ -66,7 +67,7 @@ struct ContentView: View {
     @State private var currentStep: EnhanceStep = .importClip
     @State private var renderProgress: Double = 0
     @State private var logs: [StatusLogEntry] = [
-        StatusLogEntry(timeText: "NOW", message: "Manual Files export engine ready")
+        StatusLogEntry(timeText: "NOW", message: "Naise+ pro export engine ready")
     ]
     @State private var isProcessing = false
     @State private var exportError: String?
@@ -108,7 +109,7 @@ struct ContentView: View {
                 Spacer(minLength: 8)
                 exportButton
 
-                if let exportedVideoURL {
+                if exportedVideoURL != nil {
                     Button {
                         isShowingFileExporter = true
                     } label: {
@@ -124,7 +125,7 @@ struct ContentView: View {
                     .padding(.top, 8)
                     .fileExporter(
                         isPresented: $isShowingFileExporter,
-                        document: ExportedVideoDocument(sourceURL: exportedVideoURL),
+                        document: ExportedVideoDocument(sourceURL: exportedVideoURL!),
                         contentType: .mpeg4Movie,
                         defaultFilename: "NaisePlus_\(platform)_\(resolution)_\(fps.replacingOccurrences(of: " ", with: ""))"
                     ) { result in
@@ -503,8 +504,8 @@ struct ContentView: View {
         renderProgress = 0
         currentStep = .render
         statusTitle = "Rendering \(fps)"
-        statusDetail = "Building clean \(resolution) master..."
-        appendLog("Encoding \(resolution) @ \(fps)")
+        statusDetail = "Optimizing for \(platform) (\(resolution))..."
+        appendLog("Rendering \(resolution) @ \(fps) for \(platform)")
 
         let targetFPS: Int32 = fps == "60 FPS" ? 60 : 30
         let chosenResolution = resolution
@@ -519,19 +520,15 @@ struct ContentView: View {
                 .appendingPathComponent("NaisePlus_\(UUID().uuidString)")
                 .appendingPathExtension("mp4")
 
-            var lastBucket = -1
-            let result = try await renderStreamSafely(
+            let profile = try await runPaduExport(
                 inputURL: videoURL,
                 outputURL: outputURL,
-                targetFPS: targetFPS,
+                platform: chosenPlatform,
                 resolution: chosenResolution,
+                targetFPS: targetFPS,
                 onProgress: { p in
-                    let bucket = Int(min(100, max(0, p * 100)) / 5)
-                    if bucket != lastBucket {
-                        lastBucket = bucket
-                        Task { @MainActor in
-                            renderProgress = min(1.0, max(0, p))
-                        }
+                    Task { @MainActor in
+                        renderProgress = min(1.0, max(0.0, p))
                     }
                 }
             )
@@ -540,8 +537,8 @@ struct ContentView: View {
             renderProgress = 1.0
             currentStep = .ready
             statusTitle = "Export ready"
-            statusDetail = "\(Int(result.size.width))×\(Int(result.size.height)) · \(targetFPS)FPS · Tap Save to Files"
-            appendLog("Export ready (\(result.writtenFrames)f) · \(chosenPlatform)")
+            statusDetail = "\(Int(profile.outputSize.width))×\(Int(profile.outputSize.height)) · \(profile.targetFPS)FPS · \(String(format: "%.1f", profile.bitrateMbps))Mbps"
+            appendLog("Ready · Tap Save to Files")
         } catch {
             exportError = error.localizedDescription
             currentStep = .profile
@@ -552,18 +549,82 @@ struct ContentView: View {
     }
 }
 
-private func renderStreamSafely(
+private func buildExportProfile(
+    orientedSize: CGSize,
+    platform: String,
+    resolution: String,
+    targetFPS: Int32,
+    compatiblePresets: [String]
+) -> ExportProfile {
+    let maxSide: CGFloat
+    let basePreset: String
+    switch resolution {
+    case "720p":
+        maxSide = 1280
+        basePreset = AVAssetExportPreset1280x720
+    case "1080p":
+        maxSide = 1920
+        basePreset = AVAssetExportPreset1920x1080
+    default:
+        maxSide = 2160
+        basePreset = AVAssetExportPresetHighestQuality
+    }
+
+    let platformCap: CGFloat
+    switch platform {
+    case "WhatsApp":
+        platformCap = min(maxSide, 1280)
+    case "Instagram", "TikTok", "Facebook":
+        platformCap = maxSide
+    default:
+        platformCap = maxSide
+    }
+
+    let scale = min(1.0, platformCap / max(orientedSize.width, orientedSize.height))
+    let outputSize = CGSize(
+        width: max(2, floor(orientedSize.width * scale / 2) * 2),
+        height: max(2, floor(orientedSize.height * scale / 2) * 2)
+    )
+
+    let fpsMultiplier: Double = targetFPS == 60 ? 1.35 : 1.0
+    let baseMbps: Double
+    switch resolution {
+    case "720p": baseMbps = 5.5
+    case "1080p": baseMbps = 10.5
+    default: baseMbps = 18.0
+    }
+    let platformFactor: Double = platform == "WhatsApp" ? 0.75 : 1.0
+    let bitrateMbps = max(2.5, min(28.0, baseMbps * fpsMultiplier * platformFactor))
+
+    let chosenPreset: String
+    if compatiblePresets.contains(basePreset) {
+        chosenPreset = basePreset
+    } else if compatiblePresets.contains(AVAssetExportPresetHighestQuality) {
+        chosenPreset = AVAssetExportPresetHighestQuality
+    } else {
+        chosenPreset = compatiblePresets.first ?? AVAssetExportPresetMediumQuality
+    }
+
+    return ExportProfile(
+        outputSize: outputSize,
+        targetFPS: targetFPS,
+        presetName: chosenPreset,
+        bitrateMbps: bitrateMbps
+    )
+}
+
+private func runPaduExport(
     inputURL: URL,
     outputURL: URL,
-    targetFPS: Int32,
+    platform: String,
     resolution: String,
+    targetFPS: Int32,
     onProgress: @escaping (Double) -> Void
-) async throws -> RenderResult {
+) async throws -> ExportProfile {
     let asset = AVURLAsset(url: inputURL)
     guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
         throw NSError(domain: "NaisePlus", code: 1, userInfo: [NSLocalizedDescriptionKey: "No video track found"])
     }
-    let audioTrack = try await asset.loadTracks(withMediaType: .audio).first
 
     let sourceSize = try await videoTrack.load(.naturalSize)
     let sourceTransform = try await videoTrack.load(.preferredTransform)
@@ -575,200 +636,66 @@ private func renderStreamSafely(
         throw NSError(domain: "NaisePlus", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid video dimensions"])
     }
 
-    let maxSide: CGFloat
-    switch resolution {
-    case "720p": maxSide = 1280
-    case "1080p": maxSide = 1920
-    default: maxSide = 2160
-    }
-
-    let scale = min(1.0, maxSide / max(orientedSize.width, orientedSize.height))
-    let outputSize = CGSize(
-        width: max(2, floor(orientedSize.width * scale / 2) * 2),
-        height: max(2, floor(orientedSize.height * scale / 2) * 2)
+    let compatiblePresets = AVAssetExportSession.exportPresets(compatibleWith: asset)
+    let profile = buildExportProfile(
+        orientedSize: orientedSize,
+        platform: platform,
+        resolution: resolution,
+        targetFPS: targetFPS,
+        compatiblePresets: compatiblePresets
     )
 
-    let reader = try AVAssetReader(asset: asset)
-
-    let readerVideoSettings: [String: Any] = [
-        kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
-    ]
-    let videoReaderOutput = AVAssetReaderVideoCompositionOutput(videoTracks: [videoTrack], videoSettings: readerVideoSettings)
-    videoReaderOutput.alwaysCopiesSampleData = false
-
-    let videoComposition = AVMutableVideoComposition()
-    videoComposition.renderSize = outputSize
-    videoComposition.frameDuration = CMTime(value: 1, timescale: targetFPS)
+    let composition = AVMutableVideoComposition()
+    composition.renderSize = profile.outputSize
+    composition.frameDuration = CMTime(value: 1, timescale: profile.targetFPS)
 
     let instruction = AVMutableVideoCompositionInstruction()
     instruction.timeRange = CMTimeRange(start: .zero, duration: trackRange.duration)
+
     let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: videoTrack)
+    let scale = min(1.0, max(profile.outputSize.width, profile.outputSize.height) / max(orientedSize.width, orientedSize.height))
     let normalized = sourceTransform.concatenating(
         CGAffineTransform(translationX: -transformedRect.minX, y: -transformedRect.minY)
     )
     let scaled = normalized.concatenating(CGAffineTransform(scaleX: scale, y: scale))
     layerInstruction.setTransform(scaled, at: .zero)
+
     instruction.layerInstructions = [layerInstruction]
-    videoComposition.instructions = [instruction]
-    videoReaderOutput.videoComposition = videoComposition
+    composition.instructions = [instruction]
 
-    guard reader.canAdd(videoReaderOutput) else {
-        throw NSError(domain: "NaisePlus", code: 3, userInfo: [NSLocalizedDescriptionKey: "Cannot attach video reader"])
+    guard let session = AVAssetExportSession(asset: asset, presetName: profile.presetName) else {
+        throw NSError(domain: "NaisePlus", code: 3, userInfo: [NSLocalizedDescriptionKey: "Export session unavailable"])
     }
-    reader.add(videoReaderOutput)
 
-    var audioReaderOutput: AVAssetReaderTrackOutput?
-    if let audioTrack {
-        let aOut = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: [
-            AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: 48_000,
-            AVNumberOfChannelsKey: 2,
-            AVLinearPCMBitDepthKey: 16,
-            AVLinearPCMIsBigEndianKey: false,
-            AVLinearPCMIsFloatKey: false,
-            AVLinearPCMIsNonInterleaved: false
-        ])
-        aOut.alwaysCopiesSampleData = false
-        if reader.canAdd(aOut) {
-            reader.add(aOut)
-            audioReaderOutput = aOut
+    session.outputURL = outputURL
+    session.outputFileType = .mp4
+    session.videoComposition = composition
+    session.shouldOptimizeForNetworkUse = true
+
+    let progressTask = Task {
+        while !Task.isCancelled {
+            onProgress(Double(session.progress))
+            try? await Task.sleep(nanoseconds: 100_000_000)
         }
     }
+    defer { progressTask.cancel() }
 
-    let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
-
-    let pixels = Int(outputSize.width * outputSize.height)
-    let bitratePerPixel: Double = targetFPS == 60 ? 0.22 : 0.17
-    let targetBitrate = max(4_000_000, min(35_000_000, Int(Double(pixels) * Double(targetFPS) * bitratePerPixel)))
-
-    let writerVideoSettings: [String: Any] = [
-        AVVideoCodecKey: AVVideoCodecType.h264,
-        AVVideoWidthKey: Int(outputSize.width),
-        AVVideoHeightKey: Int(outputSize.height),
-        AVVideoCompressionPropertiesKey: [
-            AVVideoAverageBitRateKey: targetBitrate,
-            AVVideoExpectedSourceFrameRateKey: targetFPS,
-            AVVideoMaxKeyFrameIntervalKey: targetFPS,
-            AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
-        ]
-    ]
-
-    let videoWriterInput = AVAssetWriterInput(mediaType: .video, outputSettings: writerVideoSettings)
-    videoWriterInput.expectsMediaDataInRealTime = false
-
-    let pixelBufferAdaptor = AVAssetWriterInputPixelBufferAdaptor(
-        assetWriterInput: videoWriterInput,
-        sourcePixelBufferAttributes: [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-            kCVPixelBufferWidthKey as String: Int(outputSize.width),
-            kCVPixelBufferHeightKey as String: Int(outputSize.height)
-        ]
-    )
-
-    guard writer.canAdd(videoWriterInput) else {
-        throw NSError(domain: "NaisePlus", code: 4, userInfo: [NSLocalizedDescriptionKey: "Cannot attach video writer"])
-    }
-    writer.add(videoWriterInput)
-
-    var audioWriterInput: AVAssetWriterInput?
-    if audioReaderOutput != nil {
-        let aIn = AVAssetWriterInput(mediaType: .audio, outputSettings: [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: 48_000,
-            AVNumberOfChannelsKey: 2,
-            AVEncoderBitRateKey: 192_000
-        ])
-        aIn.expectsMediaDataInRealTime = false
-        if writer.canAdd(aIn) {
-            writer.add(aIn)
-            audioWriterInput = aIn
-        }
-    }
-
-    guard reader.startReading() else {
-        throw reader.error ?? NSError(domain: "NaisePlus", code: 5, userInfo: [NSLocalizedDescriptionKey: "Reader failed to start"])
-    }
-    guard writer.startWriting() else {
-        throw writer.error ?? NSError(domain: "NaisePlus", code: 6, userInfo: [NSLocalizedDescriptionKey: "Writer failed to start"])
-    }
-    writer.startSession(atSourceTime: .zero)
-
-    let totalSeconds = max(0.01, CMTimeGetSeconds(trackRange.duration))
-    let frameDuration = CMTime(value: 1, timescale: targetFPS)
-
-    let writtenFrames = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Int64, Error>) in
-        DispatchQueue.global(qos: .userInitiated).async {
-            var frameIndex: Int64 = 0
-            var latestPixelBuffer: CVPixelBuffer?
-            var finishedReadingVideo = false
-
-            while frameIndex < 250_000 {
-                let targetPTS = CMTimeMultiply(frameDuration, multiplier: Int32(frameIndex))
-                if CMTimeGetSeconds(targetPTS) >= totalSeconds {
-                    break
-                }
-
-                autoreleasepool {
-                    while !finishedReadingVideo {
-                        if let sample = videoReaderOutput.copyNextSampleBuffer() {
-                            let pts = CMSampleBufferGetPresentationTimeStamp(sample)
-                            if let pb = CMSampleBufferGetImageBuffer(sample) {
-                                latestPixelBuffer = pb
-                            }
-                            if pts >= targetPTS {
-                                break
-                            }
-                        } else {
-                            finishedReadingVideo = true
-                            break
-                        }
-                    }
-
-                    if let buffer = latestPixelBuffer {
-                        while !videoWriterInput.isReadyForMoreMediaData {
-                            Thread.sleep(forTimeInterval: 0.002)
-                        }
-                        _ = pixelBufferAdaptor.append(buffer, withPresentationTime: targetPTS)
-                    }
-                }
-
-                frameIndex += 1
-                let prog = min(1.0, CMTimeGetSeconds(targetPTS) / totalSeconds)
-                onProgress(prog)
-            }
-
-            videoWriterInput.markAsFinished()
-
-            if let aOut = audioReaderOutput, let aIn = audioWriterInput {
-                while let sample = aOut.copyNextSampleBuffer() {
-                    autoreleasepool {
-                        while !aIn.isReadyForMoreMediaData {
-                            Thread.sleep(forTimeInterval: 0.002)
-                        }
-                        _ = aIn.append(sample)
-                    }
-                }
-                aIn.markAsFinished()
-            }
-
-            if reader.status == .failed {
-                reader.cancelReading()
-                writer.cancelWriting()
-                continuation.resume(throwing: reader.error ?? NSError(domain: "NaisePlus", code: 7, userInfo: [NSLocalizedDescriptionKey: "Reader error"]))
-                return
-            }
-
-            writer.finishWriting {
-                if writer.status == .failed {
-                    continuation.resume(throwing: writer.error ?? NSError(domain: "NaisePlus", code: 8, userInfo: [NSLocalizedDescriptionKey: "Writer error"]))
-                } else {
-                    continuation.resume(returning: frameIndex)
-                }
+    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        session.exportAsynchronously {
+            switch session.status {
+            case .completed:
+                continuation.resume()
+            case .failed:
+                continuation.resume(throwing: session.error ?? NSError(domain: "NaisePlus", code: 4, userInfo: [NSLocalizedDescriptionKey: "Export failed"]))
+            case .cancelled:
+                continuation.resume(throwing: NSError(domain: "NaisePlus", code: 5, userInfo: [NSLocalizedDescriptionKey: "Export cancelled"]))
+            default:
+                continuation.resume(throwing: session.error ?? NSError(domain: "NaisePlus", code: 6, userInfo: [NSLocalizedDescriptionKey: "Export interrupted"]))
             }
         }
     }
 
-    return RenderResult(size: outputSize, writtenFrames: writtenFrames)
+    return profile
 }
 
 private struct SocialPlatformLogo: View {
