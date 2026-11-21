@@ -19,20 +19,34 @@ private struct StatusLogEntry: Identifiable {
     let message: String
 }
 
+private struct SourceClipInfo {
+    let width: Int
+    let height: Int
+    let durationSeconds: Double
+
+    var summary: String {
+        let mins = Int(durationSeconds) / 60
+        let secs = Int(durationSeconds) % 60
+        return "\(width)×\(height) · \(String(format: "%d:%02d", mins, secs))"
+    }
+}
+
 private struct RenderResult {
     let size: CGSize
+    let writtenFrames: Int64
 }
 
 struct ContentView: View {
     @State private var isLightMode = false
     @State private var selectedVideo: PhotosPickerItem?
     @State private var videoURL: URL?
+    @State private var sourceInfo: SourceClipInfo?
     @State private var statusTitle = "Ready to import"
     @State private var statusDetail = "Select a clean clip for Story / Reels"
     @State private var currentStep: EnhanceStep = .importClip
     @State private var renderProgress: Double = 0
     @State private var logs: [StatusLogEntry] = [
-        StatusLogEntry(timeText: "NOW", message: "Stable 30/60FPS engine ready")
+        StatusLogEntry(timeText: "NOW", message: "Naise+ status & gallery engine ready")
     ]
     @State private var isProcessing = false
     @State private var exportError: String?
@@ -68,10 +82,10 @@ struct ContentView: View {
         GeometryReader { geometry in
             VStack(spacing: 0) {
                 header.padding(.top, 10)
-                importArea.padding(.top, 14)
+                importArea.padding(.top, 12)
                 clearStatusCard.padding(.top, 10)
-                settingsPanel.padding(.top, 12)
-                Spacer(minLength: 10)
+                settingsPanel.padding(.top, 10)
+                Spacer(minLength: 8)
                 exportButton
 
                 if let exportError {
@@ -80,11 +94,11 @@ struct ContentView: View {
                         .foregroundStyle(.red)
                         .lineLimit(2)
                         .multilineTextAlignment(.center)
-                        .padding(.top, 6)
+                        .padding(.top, 5)
                 }
             }
             .padding(.horizontal, 20)
-            .padding(.bottom, 12)
+            .padding(.bottom, 10)
             .frame(maxWidth: 500)
             .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
             .background {
@@ -139,19 +153,19 @@ struct ContentView: View {
 
     private var importArea: some View {
         PhotosPicker(selection: $selectedVideo, matching: .videos) {
-            VStack(spacing: 8) {
+            VStack(spacing: 7) {
                 Image(systemName: videoURL == nil ? "plus" : "checkmark")
-                    .font(.system(size: 20, weight: .semibold))
+                    .font(.system(size: 19, weight: .semibold))
                     .foregroundStyle(activeAccent)
-                    .frame(width: 42, height: 42)
+                    .frame(width: 40, height: 40)
                     .background(cyanAccent.opacity(0.18), in: Circle())
                 Text(videoURL == nil ? "Import Video" : "Change Video")
                     .font(.system(size: 16, weight: .semibold))
-                Text(videoURL == nil ? "Select from Photos library" : "Tap to replace current clip")
+                Text(videoURL == nil ? "Select from Photos library" : (sourceInfo?.summary ?? "Tap to replace current clip"))
                     .font(.system(size: 11)).foregroundStyle(mutedText)
             }
             .frame(maxWidth: .infinity)
-            .frame(height: 134)
+            .frame(height: 124)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
             .overlay {
                 RoundedRectangle(cornerRadius: 20)
@@ -169,7 +183,7 @@ struct ContentView: View {
     }
 
     private var clearStatusCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 8) {
                 Circle()
                     .fill(exportError != nil ? Color.red : (isProcessing || videoURL != nil ? activeAccent : mutedText))
@@ -190,7 +204,7 @@ struct ContentView: View {
                     let idx = EnhanceStep.allCases.firstIndex(of: step) ?? 0
                     let activeIdx = EnhanceStep.allCases.firstIndex(of: currentStep) ?? 0
                     let done = idx <= activeIdx && (videoURL != nil || step == .importClip)
-                    VStack(spacing: 4) {
+                    VStack(spacing: 3) {
                         Capsule()
                             .fill(done ? activeAccent : glassBorder)
                             .frame(height: 3)
@@ -219,27 +233,29 @@ struct ContentView: View {
                 .foregroundStyle(mutedText)
                 .lineLimit(1)
 
-            if let latestLog = logs.last {
-                HStack(spacing: 6) {
-                    Text(latestLog.timeText)
-                        .font(.system(size: 9, weight: .bold, design: .monospaced))
-                        .foregroundStyle(activeAccent)
-                    Text(latestLog.message)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(mutedText)
-                        .lineLimit(1)
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(logs.suffix(2)) { entry in
+                    HStack(spacing: 6) {
+                        Text(entry.timeText)
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .foregroundStyle(activeAccent)
+                        Text(entry.message)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(mutedText)
+                            .lineLimit(1)
+                    }
                 }
             }
         }
         .padding(.horizontal, 13)
-        .padding(.vertical, 10)
+        .padding(.vertical, 9)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(glassBorder, lineWidth: 1))
     }
 
     private var settingsPanel: some View {
-        VStack(spacing: 11) {
+        VStack(spacing: 10) {
             sectionHeading("PLATFORM", detail: platform, highlight: true)
             HStack(spacing: 6) {
                 ForEach(platforms, id: \.self) { name in
@@ -252,7 +268,7 @@ struct ContentView: View {
                     } label: {
                         SocialPlatformLogo(platform: name)
                             .frame(maxWidth: .infinity)
-                            .frame(height: 35)
+                            .frame(height: 34)
                             .foregroundStyle(isSelected ? activeAccent : mutedText)
                             .background(isSelected ? cyanAccent.opacity(0.2) : Color.clear)
                             .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -273,7 +289,7 @@ struct ContentView: View {
             sectionHeading("FRAME RATE", detail: fps == "60 FPS" ? "Smooth" : "Standard")
             choiceRow(rates, selection: $fps, labelPrefix: "FPS")
         }
-        .padding(13)
+        .padding(12)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
         .overlay(RoundedRectangle(cornerRadius: 20).stroke(glassBorder, lineWidth: 1))
     }
@@ -302,7 +318,7 @@ struct ContentView: View {
                     withAnimation(.snappy(duration: 0.2)) {
                         selection.wrappedValue = option
                         if videoURL != nil && !isProcessing {
-                            statusDetail = "Keep clean source · \(resolution) · \(fps)"
+                            statusDetail = "Clean source · \(resolution) · \(fps)"
                         }
                         appendLog("\(labelPrefix): \(option)")
                     }
@@ -310,7 +326,7 @@ struct ContentView: View {
                     Text(option)
                         .font(.system(size: 13, weight: .semibold))
                         .frame(maxWidth: .infinity)
-                        .frame(height: 35)
+                        .frame(height: 34)
                         .foregroundStyle(isSelected ? activeAccent : mutedText)
                         .background(isSelected ? cyanAccent.opacity(0.2) : Color.clear)
                         .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -349,8 +365,8 @@ struct ContentView: View {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"
         logs.append(StatusLogEntry(timeText: formatter.string(from: Date()), message: message))
-        if logs.count > 12 {
-            logs.removeFirst(logs.count - 12)
+        if logs.count > 16 {
+            logs.removeFirst(logs.count - 16)
         }
     }
 
@@ -363,6 +379,7 @@ struct ContentView: View {
     private func loadVideo(_ item: PhotosPickerItem?) async {
         cleanupTempFile(videoURL)
         videoURL = nil
+        sourceInfo = nil
         exportError = nil
         renderProgress = 0
 
@@ -390,11 +407,25 @@ struct ContentView: View {
                 .appendingPathComponent(UUID().uuidString)
                 .appendingPathExtension("mov")
             try data.write(to: url, options: .atomic)
+
+            let asset = AVURLAsset(url: url)
+            if let track = try await asset.loadTracks(withMediaType: .video).first {
+                let nat = try await track.load(.naturalSize)
+                let tf = try await track.load(.preferredTransform)
+                let tr = try await track.load(.timeRange)
+                let rect = CGRect(origin: .zero, size: nat).applying(tf)
+                sourceInfo = SourceClipInfo(
+                    width: Int(abs(rect.width)),
+                    height: Int(abs(rect.height)),
+                    durationSeconds: max(0, CMTimeGetSeconds(tr.duration))
+                )
+            }
+
             videoURL = url
             currentStep = .profile
             statusTitle = "Clean source ready"
-            statusDetail = "\(platform) · \(resolution) · \(fps)"
-            appendLog("Clip loaded")
+            statusDetail = "\(sourceInfo?.summary ?? "Clip") · \(resolution) · \(fps)"
+            appendLog("Loaded \(sourceInfo?.summary ?? "video")")
         } catch {
             exportError = error.localizedDescription
             statusTitle = "Import failed"
@@ -442,45 +473,68 @@ struct ContentView: View {
                 targetFPS: targetFPS,
                 resolution: chosenResolution,
                 onProgress: { p in
-                    let bucket = Int(min(95, max(0, p * 100)) / 5)
+                    let bucket = Int(min(94, max(0, p * 100)) / 5)
                     if bucket != lastReportedBucket {
                         lastReportedBucket = bucket
                         Task { @MainActor in
-                            renderProgress = min(0.95, max(0, p))
+                            renderProgress = min(0.94, max(0, p))
                         }
                     }
                 }
             )
 
-            renderProgress = 0.98
+            renderProgress = 0.96
             statusTitle = "Saving to Gallery"
-            statusDetail = "Writing \(Int(result.size.width))×\(Int(result.size.height)) @ \(targetFPS)FPS..."
-            appendLog("Saving to Gallery")
+            statusDetail = "Writing \(Int(result.size.width))×\(Int(result.size.height)) (\(result.writtenFrames)f)..."
+            appendLog("Saving \(result.writtenFrames) frames to Gallery")
 
-            let hasUsageDesc = Bundle.main.object(forInfoDictionaryKey: "NSPhotoLibraryAddUsageDescription") != nil
-            if hasUsageDesc {
-                let authStatus = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-                guard authStatus == .authorized || authStatus == .limited else {
-                    throw NSError(domain: "NaisePlus", code: 5, userInfo: [NSLocalizedDescriptionKey: "Allow Photos access in Settings"])
-                }
-            }
-
-            try await PHPhotoLibrary.shared().performChanges {
-                PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: outputURL)
-            }
+            try await saveVideoSafelyToGallery(fileURL: outputURL)
 
             renderProgress = 1
             currentStep = .ready
             statusTitle = "Saved to Gallery"
             statusDetail = "\(Int(result.size.width))×\(Int(result.size.height)) · \(targetFPS)FPS · \(chosenPlatform)"
-            appendLog("Saved \(Int(result.size.width))×\(Int(result.size.height)) @ \(targetFPS)fps")
+            appendLog("Gallery complete · \(Int(result.size.width))×\(Int(result.size.height))")
         } catch {
             exportError = error.localizedDescription
             currentStep = .profile
             statusTitle = "Export failed"
             statusDetail = "Adjust settings and retry"
-            appendLog("Render/save failed")
+            appendLog("Failed: \(error.localizedDescription)")
         }
+    }
+}
+
+private func saveVideoSafelyToGallery(fileURL: URL) async throws {
+    guard FileManager.default.fileExists(atPath: fileURL.path) else {
+        throw NSError(domain: "NaisePlus", code: 10, userInfo: [NSLocalizedDescriptionKey: "Rendered video file missing"])
+    }
+
+    let currentStatus = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+    switch currentStatus {
+    case .authorized, .limited:
+        break
+    case .notDetermined:
+        let requested = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        guard requested == .authorized || requested == .limited else {
+            throw NSError(domain: "NaisePlus", code: 11, userInfo: [NSLocalizedDescriptionKey: "Photos permission denied"])
+        }
+    default:
+        throw NSError(domain: "NaisePlus", code: 12, userInfo: [NSLocalizedDescriptionKey: "Enable Photos access in Settings"])
+    }
+
+    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        PHPhotoLibrary.shared().performChanges({
+            _ = PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: fileURL)
+        }, completionHandler: { success, error in
+            if let error {
+                continuation.resume(throwing: error)
+            } else if !success {
+                continuation.resume(throwing: NSError(domain: "NaisePlus", code: 13, userInfo: [NSLocalizedDescriptionKey: "Could not save video to Gallery"]))
+            } else {
+                continuation.resume()
+            }
+        })
     }
 }
 
@@ -626,6 +680,7 @@ private func renderCleanVideoAsync(
 
     let totalSeconds = max(0.01, CMTimeGetSeconds(trackRange.duration))
     let frameDuration = CMTime(value: 1, timescale: targetFPS)
+    var totalWrittenFrames: Int64 = 0
 
     try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
         let stateQueue = DispatchQueue(label: "naise.plus.render.state")
@@ -654,6 +709,7 @@ private func renderCleanVideoAsync(
             stateQueue.async {
                 guard videoDone && audioDone && !completed && !finishingWriter else { return }
                 finishingWriter = true
+                totalWrittenFrames = frameIndex
 
                 if reader.status == .failed {
                     failOnce(reader.error ?? NSError(domain: "NaisePlus", code: 7, userInfo: [NSLocalizedDescriptionKey: "Reader error"]))
@@ -714,7 +770,7 @@ private func renderCleanVideoAsync(
                 }
 
                 frameIndex += 1
-                let prog = min(0.95, CMTimeGetSeconds(targetPTS) / totalSeconds)
+                let prog = min(0.94, CMTimeGetSeconds(targetPTS) / totalSeconds)
                 onProgress(prog)
             }
         }
@@ -745,7 +801,7 @@ private func renderCleanVideoAsync(
         }
     }
 
-    return RenderResult(size: outputSize)
+    return RenderResult(size: outputSize, writtenFrames: totalWrittenFrames)
 }
 
 private struct SocialPlatformLogo: View {
