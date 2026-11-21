@@ -251,16 +251,25 @@ struct ContentView: View {
         .opacity(videoURL == nil || isProcessing ? 0.55 : 1)
     }
 
+    private func cleanupTempFile(_ url: URL?) {
+        guard let url else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
+
     @MainActor
     private func loadVideo(_ item: PhotosPickerItem?) async {
+        cleanupTempFile(videoURL)
+        cleanupTempFile(exportedVideoURL)
         videoURL = nil
         exportedVideoURL = nil
         exportError = nil
+
         guard let item else {
             videoName = "Ready to import"
             return
         }
         videoName = "Loading video..."
+
         do {
             guard let data = try await item.loadTransferable(type: Data.self) else {
                 videoName = "Unable to load video"
@@ -284,20 +293,25 @@ struct ContentView: View {
             videoName = "Please import a video"
             return
         }
+
+        cleanupTempFile(exportedVideoURL)
         isProcessing = true
         exportError = nil
         exportedVideoURL = nil
         videoName = "Processing \(resolution) (\(fps))..."
         defer { isProcessing = false }
+
         do {
             let asset = AVURLAsset(url: videoURL)
             guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
                 throw NSError(domain: "NaisePlus", code: 1, userInfo: [NSLocalizedDescriptionKey: "No video track found"])
             }
+
             let sourceSize = try await videoTrack.load(.naturalSize)
             let sourceTransform = try await videoTrack.load(.preferredTransform)
-            let transformed = sourceSize.applying(sourceTransform)
-            let orientedSize = CGSize(width: abs(transformed.width), height: abs(transformed.height))
+            let transformedRect = CGRect(origin: .zero, size: sourceSize).applying(sourceTransform)
+            let orientedSize = CGSize(width: abs(transformedRect.width), height: abs(transformedRect.height))
+
             guard orientedSize.width > 0, orientedSize.height > 0 else {
                 throw NSError(domain: "NaisePlus", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid video dimensions"])
             }
@@ -308,34 +322,42 @@ struct ContentView: View {
             case "1080p": maxSide = 1920
             default: maxSide = 3840
             }
-            // Do not upscale beyond source dimensions.
+
             let scale = min(1.0, maxSide / max(orientedSize.width, orientedSize.height))
             let outputSize = CGSize(
                 width: max(2, floor(orientedSize.width * scale / 2) * 2),
                 height: max(2, floor(orientedSize.height * scale / 2) * 2)
             )
 
+            let trackTimeRange = try await videoTrack.load(.timeRange)
+            let clipDuration = trackTimeRange.duration
+
             let composition = AVMutableComposition()
             guard let compositionTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
                 throw NSError(domain: "NaisePlus", code: 3, userInfo: [NSLocalizedDescriptionKey: "Cannot create composition track"])
             }
-            let duration = try await asset.load(.duration)
-            try compositionTrack.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: videoTrack, at: .zero)
-            compositionTrack.preferredTransform = sourceTransform
+            try compositionTrack.insertTimeRange(CMTimeRange(start: .zero, duration: clipDuration), of: videoTrack, at: .zero)
 
             if let audioTrack = try await asset.loadTracks(withMediaType: .audio).first,
                let compositionAudio = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
-                try compositionAudio.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: audioTrack, at: .zero)
+                let audioRange = try await audioTrack.load(.timeRange)
+                let audioDuration = CMTimeMinimum(clipDuration, audioRange.duration)
+                if audioDuration > .zero {
+                    try compositionAudio.insertTimeRange(CMTimeRange(start: .zero, duration: audioDuration), of: audioTrack, at: .zero)
+                }
             }
 
             let videoComposition = AVMutableVideoComposition()
             videoComposition.renderSize = outputSize
             videoComposition.frameDuration = CMTime(value: 1, timescale: fps == "60 FPS" ? 60 : 30)
+
             let instruction = AVMutableVideoCompositionInstruction()
-            instruction.timeRange = CMTimeRange(start: .zero, duration: duration)
+            instruction.timeRange = CMTimeRange(start: .zero, duration: clipDuration)
+
             let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: compositionTrack)
-            // AVFoundation applies the transform so portrait clips remain portrait.
-            let normalized = sourceTransform.concatenating(CGAffineTransform(translationX: -transformed.minX, y: -transformed.minY))
+            let normalized = sourceTransform.concatenating(
+                CGAffineTransform(translationX: -transformedRect.minX, y: -transformedRect.minY)
+            )
             let scaled = normalized.concatenating(CGAffineTransform(scaleX: scale, y: scale))
             layer.setTransform(scaled, at: .zero)
             instruction.layerInstructions = [layer]
@@ -345,9 +367,11 @@ struct ContentView: View {
                 throw NSError(domain: "NaisePlus", code: 4, userInfo: [NSLocalizedDescriptionKey: "Cannot create export session"])
             }
             session.videoComposition = videoComposition
+
             let outputURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("NaisePlus_\(UUID().uuidString)")
                 .appendingPathExtension("mp4")
+
             try await session.export(to: outputURL, as: .mp4)
             exportedVideoURL = outputURL
             videoName = "Exported for \(platform) · \(resolution) · \(fps)"
