@@ -19,6 +19,10 @@ private struct StatusLogEntry: Identifiable {
     let message: String
 }
 
+private struct RenderResult {
+    let size: CGSize
+}
+
 struct ContentView: View {
     @State private var isLightMode = false
     @State private var selectedVideo: PhotosPickerItem?
@@ -28,7 +32,7 @@ struct ContentView: View {
     @State private var currentStep: EnhanceStep = .importClip
     @State private var renderProgress: Double = 0
     @State private var logs: [StatusLogEntry] = [
-        StatusLogEntry(timeText: "NOW", message: "AVAssetWriter 30/60FPS engine ready")
+        StatusLogEntry(timeText: "NOW", message: "Stable 30/60FPS engine ready")
     ]
     @State private var isProcessing = false
     @State private var exportError: String?
@@ -431,19 +435,22 @@ struct ContentView: View {
                 .appendingPathExtension("mp4")
             tempOutputURL = outputURL
 
-            let result = try await Task.detached(priority: .userInitiated) { [videoURL, outputURL, targetFPS, chosenResolution] in
-                try renderCleanVideo(
-                    inputURL: videoURL,
-                    outputURL: outputURL,
-                    targetFPS: targetFPS,
-                    resolution: chosenResolution,
-                    onProgress: { p in
+            var lastReportedBucket = -1
+            let result = try await renderCleanVideoAsync(
+                inputURL: videoURL,
+                outputURL: outputURL,
+                targetFPS: targetFPS,
+                resolution: chosenResolution,
+                onProgress: { p in
+                    let bucket = Int(min(95, max(0, p * 100)) / 5)
+                    if bucket != lastReportedBucket {
+                        lastReportedBucket = bucket
                         Task { @MainActor in
-                            renderProgress = p
+                            renderProgress = min(0.95, max(0, p))
                         }
                     }
-                )
-            }.value
+                }
+            )
 
             renderProgress = 1
             statusTitle = "Saving to Gallery"
@@ -473,64 +480,27 @@ struct ContentView: View {
     }
 }
 
-private struct RenderResult {
-    let size: CGSize
-}
-
-private func renderCleanVideo(
+private func renderCleanVideoAsync(
     inputURL: URL,
     outputURL: URL,
     targetFPS: Int32,
     resolution: String,
     onProgress: @escaping (Double) -> Void
-) throws -> RenderResult {
+) async throws -> RenderResult {
     let asset = AVURLAsset(url: inputURL)
-    let semaphore = DispatchSemaphore(value: 0)
-
-    var loadedVideoTrack: AVAssetTrack?
-    var loadedAudioTrack: AVAssetTrack?
-    var loadError: Error?
-
-    Task {
-        do {
-            loadedVideoTrack = try await asset.loadTracks(withMediaType: .video).first
-            loadedAudioTrack = try await asset.loadTracks(withMediaType: .audio).first
-        } catch {
-            loadError = error
-        }
-        semaphore.signal()
-    }
-    semaphore.wait()
-
-    if let loadError { throw loadError }
-    guard let videoTrack = loadedVideoTrack else {
+    guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
         throw NSError(domain: "NaisePlus", code: 1, userInfo: [NSLocalizedDescriptionKey: "No video track found"])
     }
+    let audioTrack = try await asset.loadTracks(withMediaType: .audio).first
 
-    var trackProps: (CGSize, CGAffineTransform, CMTimeRange)?
-    var propError: Error?
-    Task {
-        do {
-            let nat = try await videoTrack.load(.naturalSize)
-            let tf = try await videoTrack.load(.preferredTransform)
-            let tr = try await videoTrack.load(.timeRange)
-            trackProps = (nat, tf, tr)
-        } catch {
-            propError = error
-        }
-        semaphore.signal()
-    }
-    semaphore.wait()
-
-    if let propError { throw propError }
-    guard let (sourceSize, sourceTransform, trackRange) = trackProps else {
-        throw NSError(domain: "NaisePlus", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid video track"])
-    }
+    let sourceSize = try await videoTrack.load(.naturalSize)
+    let sourceTransform = try await videoTrack.load(.preferredTransform)
+    let trackRange = try await videoTrack.load(.timeRange)
 
     let transformedRect = CGRect(origin: .zero, size: sourceSize).applying(sourceTransform)
     let orientedSize = CGSize(width: abs(transformedRect.width), height: abs(transformedRect.height))
     guard orientedSize.width > 0, orientedSize.height > 0 else {
-        throw NSError(domain: "NaisePlus", code: 3, userInfo: [NSLocalizedDescriptionKey: "Invalid video dimensions"])
+        throw NSError(domain: "NaisePlus", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid video dimensions"])
     }
 
     let maxSide: CGFloat
@@ -552,7 +522,7 @@ private func renderCleanVideo(
         kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
     ]
     let videoReaderOutput = AVAssetReaderVideoCompositionOutput(videoTracks: [videoTrack], videoSettings: readerVideoSettings)
-    videoReaderOutput.alwaysCopiesSampleData = false
+    videoReaderOutput.alwaysCopiesSampleData = true
 
     let videoComposition = AVMutableVideoComposition()
     videoComposition.renderSize = outputSize
@@ -571,12 +541,12 @@ private func renderCleanVideo(
     videoReaderOutput.videoComposition = videoComposition
 
     guard reader.canAdd(videoReaderOutput) else {
-        throw NSError(domain: "NaisePlus", code: 4, userInfo: [NSLocalizedDescriptionKey: "Cannot attach video reader"])
+        throw NSError(domain: "NaisePlus", code: 3, userInfo: [NSLocalizedDescriptionKey: "Cannot attach video reader"])
     }
     reader.add(videoReaderOutput)
 
     var audioReaderOutput: AVAssetReaderTrackOutput?
-    if let audioTrack = loadedAudioTrack {
+    if let audioTrack {
         let aOut = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: [
             AVFormatIDKey: kAudioFormatLinearPCM,
             AVSampleRateKey: 48_000,
@@ -586,7 +556,7 @@ private func renderCleanVideo(
             AVLinearPCMIsFloatKey: false,
             AVLinearPCMIsNonInterleaved: false
         ])
-        aOut.alwaysCopiesSampleData = false
+        aOut.alwaysCopiesSampleData = true
         if reader.canAdd(aOut) {
             reader.add(aOut)
             audioReaderOutput = aOut
@@ -623,7 +593,7 @@ private func renderCleanVideo(
     )
 
     guard writer.canAdd(videoWriterInput) else {
-        throw NSError(domain: "NaisePlus", code: 5, userInfo: [NSLocalizedDescriptionKey: "Cannot attach video writer"])
+        throw NSError(domain: "NaisePlus", code: 4, userInfo: [NSLocalizedDescriptionKey: "Cannot attach video writer"])
     }
     writer.add(videoWriterInput)
 
@@ -643,90 +613,125 @@ private func renderCleanVideo(
     }
 
     guard reader.startReading() else {
-        throw reader.error ?? NSError(domain: "NaisePlus", code: 6, userInfo: [NSLocalizedDescriptionKey: "Reader failed to start"])
+        throw reader.error ?? NSError(domain: "NaisePlus", code: 5, userInfo: [NSLocalizedDescriptionKey: "Reader failed to start"])
     }
     guard writer.startWriting() else {
-        throw writer.error ?? NSError(domain: "NaisePlus", code: 7, userInfo: [NSLocalizedDescriptionKey: "Writer failed to start"])
+        throw writer.error ?? NSError(domain: "NaisePlus", code: 6, userInfo: [NSLocalizedDescriptionKey: "Writer failed to start"])
     }
     writer.startSession(atSourceTime: .zero)
 
     let totalSeconds = max(0.01, CMTimeGetSeconds(trackRange.duration))
     let frameDuration = CMTime(value: 1, timescale: targetFPS)
-    var frameIndex: Int64 = 0
-    var latestPixelBuffer: CVPixelBuffer?
-    var finishedReadingVideo = false
 
-    let videoQueue = DispatchQueue(label: "naise.plus.video.render")
-    let audioQueue = DispatchQueue(label: "naise.plus.audio.render")
-    let group = DispatchGroup()
+    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        let stateQueue = DispatchQueue(label: "naise.plus.render.state")
+        let videoQueue = DispatchQueue(label: "naise.plus.video.queue")
+        let audioQueue = DispatchQueue(label: "naise.plus.audio.queue")
 
-    group.enter()
-    videoWriterInput.requestMediaDataWhenReady(on: videoQueue) {
-        while videoWriterInput.isReadyForMoreMediaData {
-            let targetPTS = CMTimeMultiply(frameDuration, multiplier: Int32(frameIndex))
-            if CMTimeGetSeconds(targetPTS) >= totalSeconds {
-                videoWriterInput.markAsFinished()
-                group.leave()
-                return
-            }
+        var frameIndex: Int64 = 0
+        var latestPixelBuffer: CVPixelBuffer?
+        var finishedReadingVideo = false
+        var videoDone = false
+        var audioDone = (audioReaderOutput == nil || audioWriterInput == nil)
+        var completed = false
 
-            while !finishedReadingVideo {
-                if let sample = videoReaderOutput.copyNextSampleBuffer() {
-                    let pts = CMSampleBufferGetPresentationTimeStamp(sample)
-                    if let pb = CMSampleBufferGetImageBuffer(sample) {
-                        latestPixelBuffer = pb
-                    }
-                    if pts >= targetPTS {
-                        break
-                    }
-                } else {
-                    finishedReadingVideo = true
-                    break
+        func finishOnce(_ result: Result<Void, Error>) {
+            stateQueue.async {
+                guard !completed else { return }
+                completed = true
+                switch result {
+                case .success:
+                    continuation.resume()
+                case .failure(let err):
+                    reader.cancelReading()
+                    writer.cancelWriting()
+                    continuation.resume(throwing: err)
                 }
             }
-
-            if let buffer = latestPixelBuffer {
-                _ = pixelBufferAdaptor.append(buffer, withPresentationTime: targetPTS)
-            }
-
-            frameIndex += 1
-            let prog = min(0.95, CMTimeGetSeconds(targetPTS) / totalSeconds)
-            onProgress(prog)
         }
-    }
 
-    if let aOut = audioReaderOutput, let aIn = audioWriterInput {
-        group.enter()
-        aIn.requestMediaDataWhenReady(on: audioQueue) {
-            while aIn.isReadyForMoreMediaData {
-                if let sample = aOut.copyNextSampleBuffer() {
-                    if !aIn.append(sample) {
-                        aIn.markAsFinished()
-                        group.leave()
-                        return
-                    }
-                } else {
-                    aIn.markAsFinished()
-                    group.leave()
+        func checkBothStreamsFinished() {
+            stateQueue.async {
+                guard videoDone && audioDone && !completed else { return }
+                if reader.status == .failed {
+                    finishOnce(.failure(reader.error ?? NSError(domain: "NaisePlus", code: 7, userInfo: [NSLocalizedDescriptionKey: "Reader error"])))
                     return
                 }
+                writer.finishWriting {
+                    if writer.status == .failed {
+                        finishOnce(.failure(writer.error ?? NSError(domain: "NaisePlus", code: 8, userInfo: [NSLocalizedDescriptionKey: "Writer error"])))
+                    } else {
+                        finishOnce(.success(()))
+                    }
+                }
             }
         }
-    }
 
-    group.wait()
+        videoWriterInput.requestMediaDataWhenReady(on: videoQueue) {
+            while videoWriterInput.isReadyForMoreMediaData {
+                let isFinishedNow = stateQueue.sync { completed }
+                if isFinishedNow {
+                    videoWriterInput.markAsFinished()
+                    return
+                }
 
-    if reader.status == .failed {
-        throw reader.error ?? NSError(domain: "NaisePlus", code: 8, userInfo: [NSLocalizedDescriptionKey: "Reader error"])
-    }
+                let targetPTS = CMTimeMultiply(frameDuration, multiplier: Int32(frameIndex))
+                if CMTimeGetSeconds(targetPTS) >= totalSeconds {
+                    videoWriterInput.markAsFinished()
+                    stateQueue.sync { videoDone = true }
+                    checkBothStreamsFinished()
+                    return
+                }
 
-    writer.finishWriting {
-        semaphore.signal()
-    }
-    semaphore.wait()
+                while !finishedReadingVideo {
+                    if let sample = videoReaderOutput.copyNextSampleBuffer() {
+                        let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+                        if let pb = CMSampleBufferGetImageBuffer(sample) {
+                            latestPixelBuffer = pb
+                        }
+                        if pts >= targetPTS {
+                            break
+                        }
+                    } else {
+                        finishedReadingVideo = true
+                        break
+                    }
+                }
 
-    if writer.status == .failed {
-        throw writer.error ?? NSError(domain: "NaisePlus", code: 9, userInfo: [NSLocalizedDescriptionKey: "Writer error"])
+                if let buffer = latestPixelBuffer {
+                    _ = pixelBufferAdaptor.append(buffer, withPresentationTime: targetPTS)
+                }
+
+                frameIndex += 1
+                let prog = min(0.95, CMTimeGetSeconds(targetPTS) / totalSeconds)
+                onProgress(prog)
+            }
+        }
+
+        if let aOut = audioReaderOutput, let aIn = audioWriterInput {
+            aIn.requestMediaDataWhenReady(on: audioQueue) {
+                while aIn.isReadyForMoreMediaData {
+                    let isFinishedNow = stateQueue.sync { completed }
+                    if isFinishedNow {
+                        aIn.markAsFinished()
+                        return
+                    }
+                    if let sample = aOut.copyNextSampleBuffer() {
+                        if !aIn.append(sample) {
+                            aIn.markAsFinished()
+                            stateQueue.sync { audioDone = true }
+                            checkBothStreamsFinished()
+                            return
+                        }
+                    } else {
+                        aIn.markAsFinished()
+                        stateQueue.sync { audioDone = true }
+                        checkBothStreamsFinished()
+                        return
+                    }
+                }
+            }
+        }
     }
 
     return RenderResult(size: outputSize)
