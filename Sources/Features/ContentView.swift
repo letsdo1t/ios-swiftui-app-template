@@ -476,6 +476,9 @@ struct ContentView: View {
 let composition = AVMutableVideoComposition(
     asset: asset,
     applyingCIFiltersWithHandler: { request in
+        request.finish(with: request.sourceImage, context: nil)
+    }
+)
 
         let source = request.sourceImage.clampedToExtent()
         let originalExtent = request.sourceImage.extent
