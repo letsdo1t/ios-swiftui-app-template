@@ -1,7 +1,6 @@
 import SwiftUI
 import PhotosUI
 import AVFoundation
-import Photos
 import CoreVideo
 import UniformTypeIdentifiers
 
@@ -36,17 +35,38 @@ private struct RenderResult {
     let writtenFrames: Int64
 }
 
+private struct ExportedVideoDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.mpeg4Movie, .movie] }
+
+    let sourceURL: URL
+
+    init(sourceURL: URL) {
+        self.sourceURL = sourceURL
+    }
+
+    init(configuration: ReadConfiguration) throws {
+        throw CocoaError(.fileReadUnsupportedScheme)
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        let data = try Data(contentsOf: sourceURL, options: .mappedIfSafe)
+        return FileWrapper(regularFileWithContents: data)
+    }
+}
+
 struct ContentView: View {
     @State private var isLightMode = false
     @State private var selectedVideo: PhotosPickerItem?
     @State private var videoURL: URL?
+    @State private var exportedVideoURL: URL?
+    @State private var isShowingFileExporter = false
     @State private var sourceInfo: SourceClipInfo?
     @State private var statusTitle = "Ready to import"
     @State private var statusDetail = "Select a clean clip for Story / Reels"
     @State private var currentStep: EnhanceStep = .importClip
     @State private var renderProgress: Double = 0
     @State private var logs: [StatusLogEntry] = [
-        StatusLogEntry(timeText: "NOW", message: "Naise+ status & gallery engine ready")
+        StatusLogEntry(timeText: "NOW", message: "Manual Files export engine ready")
     ]
     @State private var isProcessing = false
     @State private var exportError: String?
@@ -87,6 +107,38 @@ struct ContentView: View {
                 settingsPanel.padding(.top, 10)
                 Spacer(minLength: 8)
                 exportButton
+
+                if let exportedVideoURL {
+                    Button {
+                        isShowingFileExporter = true
+                    } label: {
+                        Label("Save to Files (.mp4)", systemImage: "folder.badge.plus")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(activeAccent)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 11)
+                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 13))
+                            .overlay(RoundedRectangle(cornerRadius: 13).stroke(cyanAccent.opacity(0.45), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 8)
+                    .fileExporter(
+                        isPresented: $isShowingFileExporter,
+                        document: ExportedVideoDocument(sourceURL: exportedVideoURL),
+                        contentType: .mpeg4Movie,
+                        defaultFilename: "NaisePlus_\(platform)_\(resolution)_\(fps.replacingOccurrences(of: " ", with: ""))"
+                    ) { result in
+                        switch result {
+                        case .success:
+                            statusTitle = "Saved to Files"
+                            statusDetail = "Video saved in Files app"
+                            appendLog("Saved to Files app")
+                        case .failure(let error):
+                            exportError = error.localizedDescription
+                            appendLog("Save to Files cancelled/failed")
+                        }
+                    }
+                }
 
                 if let exportError {
                     Text(exportError)
@@ -378,7 +430,9 @@ struct ContentView: View {
     @MainActor
     private func loadVideo(_ item: PhotosPickerItem?) async {
         cleanupTempFile(videoURL)
+        cleanupTempFile(exportedVideoURL)
         videoURL = nil
+        exportedVideoURL = nil
         sourceInfo = nil
         exportError = nil
         renderProgress = 0
@@ -442,6 +496,8 @@ struct ContentView: View {
             return
         }
 
+        cleanupTempFile(exportedVideoURL)
+        exportedVideoURL = nil
         isProcessing = true
         exportError = nil
         renderProgress = 0
@@ -454,9 +510,7 @@ struct ContentView: View {
         let chosenResolution = resolution
         let chosenPlatform = platform
 
-        var tempOutputURL: URL?
         defer {
-            cleanupTempFile(tempOutputURL)
             isProcessing = false
         }
 
@@ -464,37 +518,30 @@ struct ContentView: View {
             let outputURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("NaisePlus_\(UUID().uuidString)")
                 .appendingPathExtension("mp4")
-            tempOutputURL = outputURL
 
-            var lastReportedBucket = -1
-            let result = try await renderCleanVideoAsync(
+            var lastBucket = -1
+            let result = try await renderStreamSafely(
                 inputURL: videoURL,
                 outputURL: outputURL,
                 targetFPS: targetFPS,
                 resolution: chosenResolution,
                 onProgress: { p in
-                    let bucket = Int(min(94, max(0, p * 100)) / 5)
-                    if bucket != lastReportedBucket {
-                        lastReportedBucket = bucket
+                    let bucket = Int(min(100, max(0, p * 100)) / 5)
+                    if bucket != lastBucket {
+                        lastBucket = bucket
                         Task { @MainActor in
-                            renderProgress = min(0.94, max(0, p))
+                            renderProgress = min(1.0, max(0, p))
                         }
                     }
                 }
             )
 
-            renderProgress = 0.96
-            statusTitle = "Saving to Gallery"
-            statusDetail = "Writing \(Int(result.size.width))×\(Int(result.size.height)) (\(result.writtenFrames)f)..."
-            appendLog("Saving \(result.writtenFrames) frames to Gallery")
-
-            try await saveVideoSafelyToGallery(fileURL: outputURL)
-
-            renderProgress = 1
+            exportedVideoURL = outputURL
+            renderProgress = 1.0
             currentStep = .ready
-            statusTitle = "Saved to Gallery"
-            statusDetail = "\(Int(result.size.width))×\(Int(result.size.height)) · \(targetFPS)FPS · \(chosenPlatform)"
-            appendLog("Gallery complete · \(Int(result.size.width))×\(Int(result.size.height))")
+            statusTitle = "Export ready"
+            statusDetail = "\(Int(result.size.width))×\(Int(result.size.height)) · \(targetFPS)FPS · Tap Save to Files"
+            appendLog("Export ready (\(result.writtenFrames)f) · \(chosenPlatform)")
         } catch {
             exportError = error.localizedDescription
             currentStep = .profile
@@ -505,40 +552,7 @@ struct ContentView: View {
     }
 }
 
-private func saveVideoSafelyToGallery(fileURL: URL) async throws {
-    guard FileManager.default.fileExists(atPath: fileURL.path) else {
-        throw NSError(domain: "NaisePlus", code: 10, userInfo: [NSLocalizedDescriptionKey: "Rendered video file missing"])
-    }
-
-    let currentStatus = PHPhotoLibrary.authorizationStatus(for: .addOnly)
-    switch currentStatus {
-    case .authorized, .limited:
-        break
-    case .notDetermined:
-        let requested = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-        guard requested == .authorized || requested == .limited else {
-            throw NSError(domain: "NaisePlus", code: 11, userInfo: [NSLocalizedDescriptionKey: "Photos permission denied"])
-        }
-    default:
-        throw NSError(domain: "NaisePlus", code: 12, userInfo: [NSLocalizedDescriptionKey: "Enable Photos access in Settings"])
-    }
-
-    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-        PHPhotoLibrary.shared().performChanges({
-            _ = PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: fileURL)
-        }, completionHandler: { success, error in
-            if let error {
-                continuation.resume(throwing: error)
-            } else if !success {
-                continuation.resume(throwing: NSError(domain: "NaisePlus", code: 13, userInfo: [NSLocalizedDescriptionKey: "Could not save video to Gallery"]))
-            } else {
-                continuation.resume()
-            }
-        })
-    }
-}
-
-private func renderCleanVideoAsync(
+private func renderStreamSafely(
     inputURL: URL,
     outputURL: URL,
     targetFPS: Int32,
@@ -580,7 +594,7 @@ private func renderCleanVideoAsync(
         kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
     ]
     let videoReaderOutput = AVAssetReaderVideoCompositionOutput(videoTracks: [videoTrack], videoSettings: readerVideoSettings)
-    videoReaderOutput.alwaysCopiesSampleData = true
+    videoReaderOutput.alwaysCopiesSampleData = false
 
     let videoComposition = AVMutableVideoComposition()
     videoComposition.renderSize = outputSize
@@ -614,7 +628,7 @@ private func renderCleanVideoAsync(
             AVLinearPCMIsFloatKey: false,
             AVLinearPCMIsNonInterleaved: false
         ])
-        aOut.alwaysCopiesSampleData = true
+        aOut.alwaysCopiesSampleData = false
         if reader.canAdd(aOut) {
             reader.add(aOut)
             audioReaderOutput = aOut
@@ -624,8 +638,8 @@ private func renderCleanVideoAsync(
     let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
 
     let pixels = Int(outputSize.width * outputSize.height)
-    let bitratePerPixel: Double = targetFPS == 60 ? 0.24 : 0.18
-    let targetBitrate = max(4_500_000, Int(Double(pixels) * Double(targetFPS) * bitratePerPixel))
+    let bitratePerPixel: Double = targetFPS == 60 ? 0.22 : 0.17
+    let targetBitrate = max(4_000_000, min(35_000_000, Int(Double(pixels) * Double(targetFPS) * bitratePerPixel)))
 
     let writerVideoSettings: [String: Any] = [
         AVVideoCodecKey: AVVideoCodecType.h264,
@@ -634,7 +648,8 @@ private func renderCleanVideoAsync(
         AVVideoCompressionPropertiesKey: [
             AVVideoAverageBitRateKey: targetBitrate,
             AVVideoExpectedSourceFrameRateKey: targetFPS,
-            AVVideoMaxKeyFrameIntervalKey: targetFPS
+            AVVideoMaxKeyFrameIntervalKey: targetFPS,
+            AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
         ]
     ]
 
@@ -680,128 +695,80 @@ private func renderCleanVideoAsync(
 
     let totalSeconds = max(0.01, CMTimeGetSeconds(trackRange.duration))
     let frameDuration = CMTime(value: 1, timescale: targetFPS)
-    var totalWrittenFrames: Int64 = 0
 
-    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-        let stateQueue = DispatchQueue(label: "naise.plus.render.state")
-        let videoQueue = DispatchQueue(label: "naise.plus.video.queue")
-        let audioQueue = DispatchQueue(label: "naise.plus.audio.queue")
+    let writtenFrames = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Int64, Error>) in
+        DispatchQueue.global(qos: .userInitiated).async {
+            var frameIndex: Int64 = 0
+            var latestPixelBuffer: CVPixelBuffer?
+            var finishedReadingVideo = false
 
-        var frameIndex: Int64 = 0
-        var latestPixelBuffer: CVPixelBuffer?
-        var finishedReadingVideo = false
-        var videoDone = false
-        var audioDone = (audioReaderOutput == nil || audioWriterInput == nil)
-        var completed = false
-        var finishingWriter = false
-
-        func failOnce(_ err: Error) {
-            stateQueue.async {
-                guard !completed else { return }
-                completed = true
-                reader.cancelReading()
-                writer.cancelWriting()
-                continuation.resume(throwing: err)
-            }
-        }
-
-        func finishWriterIfReady() {
-            stateQueue.async {
-                guard videoDone && audioDone && !completed && !finishingWriter else { return }
-                finishingWriter = true
-                totalWrittenFrames = frameIndex
-
-                if reader.status == .failed {
-                    failOnce(reader.error ?? NSError(domain: "NaisePlus", code: 7, userInfo: [NSLocalizedDescriptionKey: "Reader error"]))
-                    return
-                }
-
-                writer.finishWriting {
-                    stateQueue.async {
-                        guard !completed else { return }
-                        completed = true
-                        if writer.status == .failed {
-                            continuation.resume(throwing: writer.error ?? NSError(domain: "NaisePlus", code: 8, userInfo: [NSLocalizedDescriptionKey: "Writer error"]))
-                        } else {
-                            continuation.resume()
-                        }
-                    }
-                }
-            }
-        }
-
-        videoWriterInput.requestMediaDataWhenReady(on: videoQueue) {
-            while videoWriterInput.isReadyForMoreMediaData {
-                let shouldStop = stateQueue.sync { completed || videoDone }
-                if shouldStop {
-                    videoWriterInput.markAsFinished()
-                    return
-                }
-
+            while frameIndex < 250_000 {
                 let targetPTS = CMTimeMultiply(frameDuration, multiplier: Int32(frameIndex))
                 if CMTimeGetSeconds(targetPTS) >= totalSeconds {
-                    videoWriterInput.markAsFinished()
-                    stateQueue.sync { videoDone = true }
-                    finishWriterIfReady()
-                    return
+                    break
                 }
 
-                while !finishedReadingVideo {
-                    if let sample = videoReaderOutput.copyNextSampleBuffer() {
-                        let pts = CMSampleBufferGetPresentationTimeStamp(sample)
-                        if let pb = CMSampleBufferGetImageBuffer(sample) {
-                            latestPixelBuffer = pb
-                        }
-                        if pts >= targetPTS {
+                autoreleasepool {
+                    while !finishedReadingVideo {
+                        if let sample = videoReaderOutput.copyNextSampleBuffer() {
+                            let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+                            if let pb = CMSampleBufferGetImageBuffer(sample) {
+                                latestPixelBuffer = pb
+                            }
+                            if pts >= targetPTS {
+                                break
+                            }
+                        } else {
+                            finishedReadingVideo = true
                             break
                         }
-                    } else {
-                        finishedReadingVideo = true
-                        break
                     }
-                }
 
-                if let buffer = latestPixelBuffer {
-                    let appended = pixelBufferAdaptor.append(buffer, withPresentationTime: targetPTS)
-                    if !appended && writer.status == .failed {
-                        failOnce(writer.error ?? NSError(domain: "NaisePlus", code: 9, userInfo: [NSLocalizedDescriptionKey: "Failed appending frame"]))
-                        return
+                    if let buffer = latestPixelBuffer {
+                        while !videoWriterInput.isReadyForMoreMediaData {
+                            Thread.sleep(forTimeInterval: 0.002)
+                        }
+                        _ = pixelBufferAdaptor.append(buffer, withPresentationTime: targetPTS)
                     }
                 }
 
                 frameIndex += 1
-                let prog = min(0.94, CMTimeGetSeconds(targetPTS) / totalSeconds)
+                let prog = min(1.0, CMTimeGetSeconds(targetPTS) / totalSeconds)
                 onProgress(prog)
             }
-        }
 
-        if let aOut = audioReaderOutput, let aIn = audioWriterInput {
-            aIn.requestMediaDataWhenReady(on: audioQueue) {
-                while aIn.isReadyForMoreMediaData {
-                    let shouldStop = stateQueue.sync { completed || audioDone }
-                    if shouldStop {
-                        aIn.markAsFinished()
-                        return
-                    }
-                    if let sample = aOut.copyNextSampleBuffer() {
-                        if !aIn.append(sample) {
-                            aIn.markAsFinished()
-                            stateQueue.sync { audioDone = true }
-                            finishWriterIfReady()
-                            return
+            videoWriterInput.markAsFinished()
+
+            if let aOut = audioReaderOutput, let aIn = audioWriterInput {
+                while let sample = aOut.copyNextSampleBuffer() {
+                    autoreleasepool {
+                        while !aIn.isReadyForMoreMediaData {
+                            Thread.sleep(forTimeInterval: 0.002)
                         }
-                    } else {
-                        aIn.markAsFinished()
-                        stateQueue.sync { audioDone = true }
-                        finishWriterIfReady()
-                        return
+                        _ = aIn.append(sample)
                     }
+                }
+                aIn.markAsFinished()
+            }
+
+            if reader.status == .failed {
+                reader.cancelReading()
+                writer.cancelWriting()
+                continuation.resume(throwing: reader.error ?? NSError(domain: "NaisePlus", code: 7, userInfo: [NSLocalizedDescriptionKey: "Reader error"]))
+                return
+            }
+
+            writer.finishWriting {
+                if writer.status == .failed {
+                    continuation.resume(throwing: writer.error ?? NSError(domain: "NaisePlus", code: 8, userInfo: [NSLocalizedDescriptionKey: "Writer error"]))
+                } else {
+                    continuation.resume(returning: frameIndex)
                 }
             }
         }
     }
 
-    return RenderResult(size: outputSize, writtenFrames: totalWrittenFrames)
+    return RenderResult(size: outputSize, writtenFrames: writtenFrames)
 }
 
 private struct SocialPlatformLogo: View {
