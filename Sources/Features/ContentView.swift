@@ -2,6 +2,7 @@ import SwiftUI
 import PhotosUI
 import AVFoundation
 import UniformTypeIdentifiers
+import CoreImage
 
 struct ContentView: View {
     @State private var isLightMode = false
@@ -470,12 +471,45 @@ struct ContentView: View {
                 )
             }
 
-            let composition = AVMutableVideoComposition(
-                asset: asset,
-                applyingCIFiltersWithHandler: { request in
-                    request.finish(with: request.sourceImage, context: nil)
-                }
-            )
+            let ciContext = CIContext()
+
+let composition = AVMutableVideoComposition(
+    asset: asset,
+    applyingCIFiltersWithHandler: { request in
+
+        let source = request.sourceImage.clampedToExtent()
+        let originalExtent = request.sourceImage.extent
+
+        let denoised = source.applyingFilter(
+            "CINoiseReduction",
+            parameters: [
+                "inputNoiseLevel": 0.02,
+                "inputSharpness": 0.40
+            ]
+        )
+
+        let sharpened = denoised.applyingFilter(
+            "CISharpenLuminance",
+            parameters: [
+                "inputSharpness": 0.45
+            ]
+        )
+
+        let enhanced = sharpened.applyingFilter(
+            "CIColorControls",
+            parameters: [
+                kCIInputSaturationKey: 1.08,
+                kCIInputContrastKey: 1.06,
+                kCIInputBrightnessKey: 0.0
+            ]
+        )
+
+        request.finish(
+            with: enhanced.cropped(to: originalExtent),
+            context: ciContext
+        )
+    }
+)
             let targetFPS: Int32 = fps == "60 FPS" ? 60 : 30
             composition.frameDuration = CMTime(value: 1, timescale: targetFPS)
             session.videoComposition = composition
