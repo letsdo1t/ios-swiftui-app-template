@@ -2,7 +2,6 @@ import SwiftUI
 import PhotosUI
 import AVFoundation
 import UniformTypeIdentifiers
-import CoreImage
 
 struct ContentView: View {
     @State private var isLightMode = false
@@ -16,20 +15,15 @@ struct ContentView: View {
     @State private var resolution = "1080p"
     @State private var fps = "60 FPS"
 
-    // Palet Frosted Glass — Dark Mode
     private let darkBgTop = Color(red: 0.08, green: 0.14, blue: 0.24)
     private let darkBgMid = Color(red: 0.05, green: 0.08, blue: 0.15)
     private let darkBgBottom = Color(red: 0.04, green: 0.05, blue: 0.09)
     private let darkMuted = Color(red: 0.58, green: 0.65, blue: 0.74)
-
-    // Palet Frosted Glass — Light Mode
     private let lightBgTop = Color(red: 0.90, green: 0.95, blue: 0.99)
     private let lightBgMid = Color(red: 0.95, green: 0.97, blue: 1.00)
     private let lightBgBottom = Color(red: 0.92, green: 0.94, blue: 0.98)
     private let lightPrimary = Color(red: 0.07, green: 0.11, blue: 0.18)
     private let lightMuted = Color(red: 0.38, green: 0.45, blue: 0.56)
-
-    // Aksen Glass
     private let cyanAccent = Color(red: 0.22, green: 0.74, blue: 0.97)
     private let cyanBright = Color(red: 0.49, green: 0.83, blue: 0.99)
     private let cyanDeep = Color(red: 0.06, green: 0.48, blue: 0.76)
@@ -48,20 +42,11 @@ struct ContentView: View {
     var body: some View {
         GeometryReader { geometry in
             VStack(spacing: 0) {
-                header
-                    .padding(.top, 12)
-
-                importArea
-                    .padding(.top, 18)
-
-                status
-                    .padding(.top, 10)
-
-                settingsPanel
-                    .padding(.top, 16)
-
+                header.padding(.top, 12)
+                importArea.padding(.top, 18)
+                status.padding(.top, 10)
+                settingsPanel.padding(.top, 16)
                 Spacer(minLength: 12)
-
                 exportButton
 
                 if let exportedVideoURL {
@@ -71,20 +56,16 @@ struct ContentView: View {
                             .foregroundStyle(activeAccent)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 12)
-                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                    .stroke(cyanAccent.opacity(0.45), lineWidth: 1)
-                            )
+                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+                            .overlay(RoundedRectangle(cornerRadius: 14).stroke(cyanAccent.opacity(0.45), lineWidth: 1))
                     }
                     .padding(.top, 10)
                 }
-
                 if let exportError {
                     Text(exportError)
                         .font(.caption2)
                         .foregroundStyle(.red)
-                        .lineLimit(2)
+                        .lineLimit(3)
                         .multilineTextAlignment(.center)
                         .padding(.top, 6)
                 }
@@ -93,82 +74,50 @@ struct ContentView: View {
             .padding(.bottom, 12)
             .frame(maxWidth: 500)
             .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
-            .background(
+            .background {
                 ZStack {
-                    LinearGradient(
-                        colors: isLightMode
-                            ? [lightBgTop, lightBgMid, lightBgBottom]
-                            : [darkBgTop, darkBgMid, darkBgBottom],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-
-                    Circle()
-                        .fill(cyanAccent.opacity(isLightMode ? 0.22 : 0.16))
-                        .frame(width: 280, height: 280)
-                        .blur(radius: 70)
-                        .offset(x: -110, y: -260)
-
-                    Circle()
-                        .fill(indigoAccent.opacity(isLightMode ? 0.16 : 0.14))
-                        .frame(width: 260, height: 260)
-                        .blur(radius: 75)
-                        .offset(x: 130, y: 180)
+                    LinearGradient(colors: isLightMode ? [lightBgTop, lightBgMid, lightBgBottom] : [darkBgTop, darkBgMid, darkBgBottom], startPoint: .topLeading, endPoint: .bottomTrailing)
+                    Circle().fill(cyanAccent.opacity(isLightMode ? 0.22 : 0.16)).frame(width: 280, height: 280).blur(radius: 70).offset(x: -110, y: -260)
+                    Circle().fill(indigoAccent.opacity(isLightMode ? 0.16 : 0.14)).frame(width: 260, height: 260).blur(radius: 75).offset(x: 130, y: 180)
                 }
                 .ignoresSafeArea()
-            )
+            }
         }
         .foregroundStyle(primaryText)
         .preferredColorScheme(isLightMode ? .light : .dark)
     }
 
-    // MARK: - Header + Light / Dark Switch
     private var header: some View {
         HStack {
             VStack(alignment: .leading, spacing: 3) {
-                Text("Naise+")
-                    .font(.system(size: 28, weight: .bold, design: .rounded))
-
-                Text("AI Video Enhancer")
-                    .font(.system(size: 13))
-                    .foregroundStyle(mutedText)
+                Text("Naise+").font(.system(size: 28, weight: .bold, design: .rounded))
+                Text("AI Video Enhancer").font(.system(size: 13)).foregroundStyle(mutedText)
             }
-
             Spacer()
-
             HStack(spacing: 4) {
                 modeButton(icon: "moon.fill", lightTarget: false)
                 modeButton(icon: "sun.max.fill", lightTarget: true)
             }
             .padding(4)
             .background(.ultraThinMaterial, in: Capsule())
-            .overlay(
-                Capsule()
-                    .stroke(glassBorder, lineWidth: 1)
-            )
+            .overlay(Capsule().stroke(glassBorder, lineWidth: 1))
         }
     }
 
     private func modeButton(icon: String, lightTarget: Bool) -> some View {
         let isSelected = isLightMode == lightTarget
         return Button {
-            withAnimation(.snappy(duration: 0.22)) {
-                isLightMode = lightTarget
-            }
+            withAnimation(.snappy(duration: 0.22)) { isLightMode = lightTarget }
         } label: {
             Image(systemName: icon)
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(isSelected ? activeAccent : mutedText)
                 .frame(width: 34, height: 34)
-                .background(
-                    isSelected ? cyanAccent.opacity(0.2) : Color.clear,
-                    in: Circle()
-                )
+                .background(isSelected ? cyanAccent.opacity(0.2) : Color.clear, in: Circle())
         }
         .buttonStyle(.plain)
     }
 
-    // MARK: - Import Area
     private var importArea: some View {
         PhotosPicker(selection: $selectedVideo, matching: .videos) {
             VStack(spacing: 10) {
@@ -177,46 +126,27 @@ struct ContentView: View {
                     .foregroundStyle(activeAccent)
                     .frame(width: 46, height: 46)
                     .background(cyanAccent.opacity(0.18), in: Circle())
-
                 Text(videoURL == nil ? "Import Video" : "Change Video")
                     .font(.system(size: 17, weight: .semibold))
-
-                Text(videoURL == nil
-                     ? "Select from Photos library"
-                     : "Tap to replace current clip")
-                    .font(.system(size: 12))
-                    .foregroundStyle(mutedText)
+                Text(videoURL == nil ? "Select from Photos library" : "Tap to replace current clip")
+                    .font(.system(size: 12)).foregroundStyle(mutedText)
             }
             .frame(maxWidth: .infinity)
             .frame(height: 152)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .stroke(
-                        videoURL == nil
-                            ? (isLightMode ? Color.black.opacity(0.14) : Color.white.opacity(0.24))
-                            : cyanAccent.opacity(0.75),
-                        style: StrokeStyle(
-                            lineWidth: 1.4,
-                            dash: videoURL == nil ? [6, 5] : []
-                        )
-                    )
-            )
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22))
+            .overlay {
+                RoundedRectangle(cornerRadius: 22)
+                    .stroke(videoURL == nil ? (isLightMode ? Color.black.opacity(0.14) : Color.white.opacity(0.24)) : cyanAccent.opacity(0.75), style: StrokeStyle(lineWidth: 1.4, dash: videoURL == nil ? [6, 5] : []))
+            }
         }
         .onChange(of: selectedVideo) { _, item in
-            Task {
-                await loadVideo(item)
-            }
+            Task { await loadVideo(item) }
         }
     }
 
-    // MARK: - Status
     private var status: some View {
         HStack(spacing: 7) {
-            Circle()
-                .fill(videoURL == nil ? mutedText : activeAccent)
-                .frame(width: 7, height: 7)
-
+            Circle().fill(videoURL == nil ? mutedText : activeAccent).frame(width: 7, height: 7)
             Text(videoName)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(videoURL == nil ? mutedText : activeAccent)
@@ -225,64 +155,39 @@ struct ContentView: View {
         .frame(maxWidth: .infinity)
     }
 
-    // MARK: - Settings Panel
     private var settingsPanel: some View {
         VStack(spacing: 13) {
             sectionHeading("PLATFORM", detail: platform, highlight: true)
-
             HStack(spacing: 6) {
                 ForEach(platforms, id: \.self) { name in
                     let isSelected = platform == name
                     Button {
-                        withAnimation(.snappy(duration: 0.2)) {
-                            platform = name
-                        }
+                        withAnimation(.snappy(duration: 0.2)) { platform = name }
                     } label: {
                         SocialPlatformLogo(platform: name)
                             .frame(maxWidth: .infinity)
                             .frame(height: 38)
                             .foregroundStyle(isSelected ? activeAccent : mutedText)
-                            .background(
-                                isSelected ? cyanAccent.opacity(0.2) : Color.clear
-                            )
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .stroke(
-                                        isSelected ? cyanAccent.opacity(0.65) : Color.clear,
-                                        lineWidth: 1
-                                    )
-                            )
+                            .background(isSelected ? cyanAccent.opacity(0.2) : Color.clear)
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(isSelected ? cyanAccent.opacity(0.65) : Color.clear, lineWidth: 1))
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(name)
                 }
             }
             .padding(4)
-            .background(
-                segmentWell,
-                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-            )
-
+            .background(segmentWell, in: RoundedRectangle(cornerRadius: 14))
             Divider().overlay(glassBorder)
-
             sectionHeading("RESOLUTION", detail: resolutionDetail)
             choiceRow(resolutions, selection: $resolution)
-
             Divider().overlay(glassBorder)
-
-            sectionHeading(
-                "FRAME RATE",
-                detail: fps == "60 FPS" ? "Smooth" : "Standard"
-            )
+            sectionHeading("FRAME RATE", detail: fps == "60 FPS" ? "Smooth" : "Standard")
             choiceRow(rates, selection: $fps)
         }
         .padding(14)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .stroke(glassBorder, lineWidth: 1)
-        )
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22))
+        .overlay(RoundedRectangle(cornerRadius: 22).stroke(glassBorder, lineWidth: 1))
     }
 
     private var resolutionDetail: String {
@@ -293,126 +198,78 @@ struct ContentView: View {
         }
     }
 
-    private func sectionHeading(
-        _ title: String,
-        detail: String,
-        highlight: Bool = false
-    ) -> some View {
+    private func sectionHeading(_ title: String, detail: String, highlight: Bool = false) -> some View {
         HStack {
-            Text(title)
-                .font(.system(size: 11, weight: .semibold))
-                .tracking(1.2)
-                .foregroundStyle(mutedText)
-
+            Text(title).font(.system(size: 11, weight: .semibold)).tracking(1.2).foregroundStyle(mutedText)
             Spacer()
-
-            Text(detail)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(highlight ? activeAccent : mutedText)
+            Text(detail).font(.system(size: 12, weight: .semibold)).foregroundStyle(highlight ? activeAccent : mutedText)
         }
     }
 
-    private func choiceRow(
-        _ options: [String],
-        selection: Binding<String>
-    ) -> some View {
+    private func choiceRow(_ options: [String], selection: Binding<String>) -> some View {
         HStack(spacing: 5) {
             ForEach(options, id: \.self) { option in
                 let isSelected = selection.wrappedValue == option
                 Button {
-                    withAnimation(.snappy(duration: 0.2)) {
-                        selection.wrappedValue = option
-                    }
+                    withAnimation(.snappy(duration: 0.2)) { selection.wrappedValue = option }
                 } label: {
                     Text(option)
                         .font(.system(size: 13, weight: .semibold))
                         .frame(maxWidth: .infinity)
                         .frame(height: 38)
                         .foregroundStyle(isSelected ? activeAccent : mutedText)
-                        .background(
-                            isSelected ? cyanAccent.opacity(0.2) : Color.clear
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .stroke(
-                                    isSelected ? cyanAccent.opacity(0.65) : Color.clear,
-                                    lineWidth: 1
-                                )
-                        )
+                        .background(isSelected ? cyanAccent.opacity(0.2) : Color.clear)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(isSelected ? cyanAccent.opacity(0.65) : Color.clear, lineWidth: 1))
                 }
                 .buttonStyle(.plain)
             }
         }
         .padding(4)
-        .background(
-            segmentWell,
-            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-        )
+        .background(segmentWell, in: RoundedRectangle(cornerRadius: 14))
     }
 
-    // MARK: - Export Button
     private var exportButton: some View {
         Button {
-            Task {
-                await exportVideo()
-            }
+            Task { await exportVideo() }
         } label: {
             HStack(spacing: 10) {
                 if isProcessing {
-                    ProgressView()
-                        .tint(.white)
+                    ProgressView().tint(.white)
                 } else {
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.white)
+                    Image(systemName: "sparkles").font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)
                 }
-
-                Text(isProcessing ? "Processing Video..." : "Enhance & Export")
-                    .foregroundStyle(.white)
+                Text(isProcessing ? "Processing Video..." : "Enhance & Export").foregroundStyle(.white)
             }
             .font(.system(size: 16, weight: .bold))
             .frame(maxWidth: .infinity)
             .padding(.vertical, 15)
-            .background(
-                LinearGradient(
-                    colors: [cyanAccent, indigoAccent],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
-            )
+            .background(LinearGradient(colors: [cyanAccent, indigoAccent], startPoint: .leading, endPoint: .trailing))
             .clipShape(Capsule())
         }
         .disabled(videoURL == nil || isProcessing)
         .opacity(videoURL == nil || isProcessing ? 0.55 : 1)
     }
 
-    // MARK: - Video Import & Export
     @MainActor
     private func loadVideo(_ item: PhotosPickerItem?) async {
         videoURL = nil
         exportedVideoURL = nil
         exportError = nil
-
         guard let item else {
             videoName = "Ready to import"
             return
         }
-
         videoName = "Loading video..."
-
         do {
             guard let data = try await item.loadTransferable(type: Data.self) else {
                 videoName = "Unable to load video"
                 return
             }
-
             let url = FileManager.default.temporaryDirectory
                 .appendingPathComponent(UUID().uuidString)
                 .appendingPathExtension("mov")
-
             try data.write(to: url, options: .atomic)
-
             videoURL = url
             videoName = "Video imported · \(resolution) · \(fps)"
         } catch {
@@ -421,90 +278,79 @@ struct ContentView: View {
         }
     }
 
-    private func resolvedPreset(for asset: AVAsset) -> String {
-        let desired: String
-        switch resolution {
-        case "720p": desired = AVAssetExportPreset1280x720
-        case "1080p": desired = AVAssetExportPreset1920x1080
-        default: desired = AVAssetExportPreset3840x2160
-        }
-
-        let compatible = AVAssetExportSession.exportPresets(compatibleWith: asset)
-        if compatible.contains(desired) {
-            return desired
-        }
-        return compatible.contains(AVAssetExportPresetHighestQuality)
-            ? AVAssetExportPresetHighestQuality
-            : (compatible.first ?? AVAssetExportPresetMediumQuality)
-    }
-
     @MainActor
     private func exportVideo() async {
         guard let videoURL else {
             videoName = "Please import a video"
             return
         }
-
         isProcessing = true
         exportError = nil
         exportedVideoURL = nil
         videoName = "Processing \(resolution) (\(fps))..."
-
-        defer {
-            isProcessing = false
-        }
-
+        defer { isProcessing = false }
         do {
             let asset = AVURLAsset(url: videoURL)
-            let preset = resolvedPreset(for: asset)
-
-            guard let session = AVAssetExportSession(
-                asset: asset,
-                presetName: preset
-            ) else {
-                throw NSError(
-                    domain: "NaisePlus",
-                    code: 1,
-                    userInfo: [
-                        NSLocalizedDescriptionKey: "Unable to create export session"
-                    ]
-                )
+            guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
+                throw NSError(domain: "NaisePlus", code: 1, userInfo: [NSLocalizedDescriptionKey: "No video track found"])
+            }
+            let sourceSize = try await videoTrack.load(.naturalSize)
+            let sourceTransform = try await videoTrack.load(.preferredTransform)
+            let transformed = sourceSize.applying(sourceTransform)
+            let orientedSize = CGSize(width: abs(transformed.width), height: abs(transformed.height))
+            guard orientedSize.width > 0, orientedSize.height > 0 else {
+                throw NSError(domain: "NaisePlus", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid video dimensions"])
             }
 
+            let maxSide: CGFloat
+            switch resolution {
+            case "720p": maxSide = 1280
+            case "1080p": maxSide = 1920
+            default: maxSide = 3840
+            }
+            // Do not upscale beyond source dimensions.
+            let scale = min(1.0, maxSide / max(orientedSize.width, orientedSize.height))
+            let outputSize = CGSize(
+                width: max(2, floor(orientedSize.width * scale / 2) * 2),
+                height: max(2, floor(orientedSize.height * scale / 2) * 2)
+            )
+
+            let composition = AVMutableComposition()
+            guard let compositionTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+                throw NSError(domain: "NaisePlus", code: 3, userInfo: [NSLocalizedDescriptionKey: "Cannot create composition track"])
+            }
+            let duration = try await asset.load(.duration)
+            try compositionTrack.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: videoTrack, at: .zero)
+            compositionTrack.preferredTransform = sourceTransform
+
+            if let audioTrack = try await asset.loadTracks(withMediaType: .audio).first,
+               let compositionAudio = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
+                try compositionAudio.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: audioTrack, at: .zero)
+            }
+
+            let videoComposition = AVMutableVideoComposition()
+            videoComposition.renderSize = outputSize
+            videoComposition.frameDuration = CMTime(value: 1, timescale: fps == "60 FPS" ? 60 : 30)
+            let instruction = AVMutableVideoCompositionInstruction()
+            instruction.timeRange = CMTimeRange(start: .zero, duration: duration)
+            let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: compositionTrack)
+            // AVFoundation applies the transform so portrait clips remain portrait.
+            let normalized = sourceTransform.concatenating(CGAffineTransform(translationX: -transformed.minX, y: -transformed.minY))
+            let scaled = normalized.concatenating(CGAffineTransform(scaleX: scale, y: scale))
+            layer.setTransform(scaled, at: .zero)
+            instruction.layerInstructions = [layer]
+            videoComposition.instructions = [instruction]
+
+            guard let session = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
+                throw NSError(domain: "NaisePlus", code: 4, userInfo: [NSLocalizedDescriptionKey: "Cannot create export session"])
+            }
+            session.videoComposition = videoComposition
             let outputURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("NaisePlus_\(UUID().uuidString)")
                 .appendingPathExtension("mp4")
-
             try await session.export(to: outputURL, as: .mp4)
-
             exportedVideoURL = outputURL
-            videoName = "Exported for \(platform) · \(resolution)"
-
-        } catch {
-            exportError = error.localizedDescription
-            videoName = "Export failed"
-        }
-    }
-
-
-let composition = AVMutableVideoComposition(
-    asset: asset,
-    applyingCIFiltersWithHandler: { request in
-        request.finish(with: request.sourceImage, context: nil)
-    }
-)
-            let targetFPS: Int32 = fps == "60 FPS" ? 60 : 30
-            composition.frameDuration = CMTime(value: 1, timescale: targetFPS)
-            session.videoComposition = composition
-
-            let outputURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("NaisePlus_\(UUID().uuidString)")
-                .appendingPathExtension("mp4")
-
-            try await session.export(to: outputURL, as: .mp4)
-
-            exportedVideoURL = outputURL
-            videoName = "Exported for \(platform) · \(resolution)"
+            videoName = "Exported for \(platform) · \(resolution) · \(fps)"
         } catch {
             exportError = error.localizedDescription
             videoName = "Export failed"
@@ -512,100 +358,47 @@ let composition = AVMutableVideoComposition(
     }
 }
 
-// MARK: - Custom Vector Social Logos
 private struct SocialPlatformLogo: View {
     let platform: String
-
     var body: some View {
         switch platform {
         case "Instagram":
             ZStack {
-                RoundedRectangle(cornerRadius: 5.5, style: .continuous)
-                    .stroke(lineWidth: 1.8)
-                    .frame(width: 19, height: 19)
-                Circle()
-                    .stroke(lineWidth: 1.8)
-                    .frame(width: 8.5, height: 8.5)
-                Circle()
-                    .fill()
-                    .frame(width: 2.3, height: 2.3)
-                    .offset(x: 5.2, y: -5.2)
+                RoundedRectangle(cornerRadius: 5.5).stroke(lineWidth: 1.8).frame(width: 19, height: 19)
+                Circle().stroke(lineWidth: 1.8).frame(width: 8.5, height: 8.5)
+                Circle().fill().frame(width: 2.3, height: 2.3).offset(x: 5.2, y: -5.2)
             }
-
         case "TikTok":
-            TikTokShape()
-                .fill(style: FillStyle(eoFill: false))
-                .frame(width: 17, height: 19)
-
+            TikTokShape().fill().frame(width: 17, height: 19)
         case "WhatsApp":
             ZStack {
-                WhatsAppBubbleShape()
-                    .stroke(style: StrokeStyle(lineWidth: 1.8, lineCap: .round, lineJoin: .round))
-                    .frame(width: 19, height: 19)
-                WhatsAppPhoneShape()
-                    .fill()
-                    .frame(width: 9.5, height: 9.5)
+                WhatsAppBubbleShape().stroke(style: StrokeStyle(lineWidth: 1.8, lineCap: .round, lineJoin: .round)).frame(width: 19, height: 19)
+                WhatsAppPhoneShape().fill().frame(width: 9.5, height: 9.5)
             }
-
-        default: // Facebook
-            FacebookFShape()
-                .fill()
-                .frame(width: 11, height: 19)
+        default:
+            FacebookFShape().fill().frame(width: 11, height: 19)
         }
     }
 }
 
 private struct TikTokShape: Shape {
     func path(in rect: CGRect) -> Path {
-        let w = rect.width
-        let h = rect.height
+        let w = rect.width, h = rect.height
         var p = Path()
         p.move(to: CGPoint(x: w * 0.68, y: h * 0.05))
         p.addLine(to: CGPoint(x: w * 0.50, y: h * 0.05))
         p.addLine(to: CGPoint(x: w * 0.50, y: h * 0.67))
-        p.addCurve(
-            to: CGPoint(x: w * 0.34, y: h * 0.80),
-            control1: CGPoint(x: w * 0.50, y: h * 0.75),
-            control2: CGPoint(x: w * 0.43, y: h * 0.80)
-        )
-        p.addCurve(
-            to: CGPoint(x: w * 0.19, y: h * 0.66),
-            control1: CGPoint(x: w * 0.25, y: h * 0.80),
-            control2: CGPoint(x: w * 0.19, y: h * 0.74)
-        )
-        p.addCurve(
-            to: CGPoint(x: w * 0.38, y: h * 0.52),
-            control1: CGPoint(x: w * 0.19, y: h * 0.57),
-            control2: CGPoint(x: w * 0.28, y: h * 0.50)
-        )
+        p.addCurve(to: CGPoint(x: w * 0.34, y: h * 0.80), control1: CGPoint(x: w * 0.50, y: h * 0.75), control2: CGPoint(x: w * 0.43, y: h * 0.80))
+        p.addCurve(to: CGPoint(x: w * 0.19, y: h * 0.66), control1: CGPoint(x: w * 0.25, y: h * 0.80), control2: CGPoint(x: w * 0.19, y: h * 0.74))
+        p.addCurve(to: CGPoint(x: w * 0.38, y: h * 0.52), control1: CGPoint(x: w * 0.19, y: h * 0.57), control2: CGPoint(x: w * 0.28, y: h * 0.50))
         p.addLine(to: CGPoint(x: w * 0.38, y: h * 0.36))
-        p.addCurve(
-            to: CGPoint(x: w * 0.03, y: h * 0.66),
-            control1: CGPoint(x: w * 0.18, y: h * 0.34),
-            control2: CGPoint(x: w * 0.03, y: h * 0.48)
-        )
-        p.addCurve(
-            to: CGPoint(x: w * 0.35, y: h * 0.96),
-            control1: CGPoint(x: w * 0.03, y: h * 0.83),
-            control2: CGPoint(x: w * 0.18, y: h * 0.96)
-        )
-        p.addCurve(
-            to: CGPoint(x: w * 0.67, y: h * 0.66),
-            control1: CGPoint(x: w * 0.53, y: h * 0.96),
-            control2: CGPoint(x: w * 0.67, y: h * 0.83)
-        )
+        p.addCurve(to: CGPoint(x: w * 0.03, y: h * 0.66), control1: CGPoint(x: w * 0.18, y: h * 0.34), control2: CGPoint(x: w * 0.03, y: h * 0.48))
+        p.addCurve(to: CGPoint(x: w * 0.35, y: h * 0.96), control1: CGPoint(x: w * 0.03, y: h * 0.83), control2: CGPoint(x: w * 0.18, y: h * 0.96))
+        p.addCurve(to: CGPoint(x: w * 0.67, y: h * 0.66), control1: CGPoint(x: w * 0.53, y: h * 0.96), control2: CGPoint(x: w * 0.67, y: h * 0.83))
         p.addLine(to: CGPoint(x: w * 0.67, y: h * 0.35))
-        p.addCurve(
-            to: CGPoint(x: w * 0.96, y: h * 0.43),
-            control1: CGPoint(x: w * 0.76, y: h * 0.40),
-            control2: CGPoint(x: w * 0.86, y: h * 0.43)
-        )
+        p.addCurve(to: CGPoint(x: w * 0.96, y: h * 0.43), control1: CGPoint(x: w * 0.76, y: h * 0.40), control2: CGPoint(x: w * 0.86, y: h * 0.43))
         p.addLine(to: CGPoint(x: w * 0.96, y: h * 0.27))
-        p.addCurve(
-            to: CGPoint(x: w * 0.68, y: h * 0.05),
-            control1: CGPoint(x: w * 0.80, y: h * 0.26),
-            control2: CGPoint(x: w * 0.69, y: h * 0.17)
-        )
+        p.addCurve(to: CGPoint(x: w * 0.68, y: h * 0.05), control1: CGPoint(x: w * 0.80, y: h * 0.26), control2: CGPoint(x: w * 0.69, y: h * 0.17))
         p.closeSubpath()
         return p
     }
@@ -613,18 +406,11 @@ private struct TikTokShape: Shape {
 
 private struct WhatsAppBubbleShape: Shape {
     func path(in rect: CGRect) -> Path {
-        let w = rect.width
-        let h = rect.height
+        let w = rect.width, h = rect.height
         var p = Path()
         p.move(to: CGPoint(x: w * 0.12, y: h * 0.90))
         p.addLine(to: CGPoint(x: w * 0.21, y: h * 0.68))
-        p.addArc(
-            center: CGPoint(x: w * 0.52, y: h * 0.48),
-            radius: w * 0.44,
-            startAngle: .degrees(145),
-            endAngle: .degrees(115),
-            clockwise: false
-        )
+        p.addArc(center: CGPoint(x: w * 0.52, y: h * 0.48), radius: w * 0.44, startAngle: .degrees(145), endAngle: .degrees(115), clockwise: false)
         p.closeSubpath()
         return p
     }
@@ -632,8 +418,7 @@ private struct WhatsAppBubbleShape: Shape {
 
 private struct WhatsAppPhoneShape: Shape {
     func path(in rect: CGRect) -> Path {
-        let w = rect.width
-        let h = rect.height
+        let w = rect.width, h = rect.height
         var p = Path()
         p.move(to: CGPoint(x: w * 0.22, y: h * 0.10))
         p.addQuadCurve(to: CGPoint(x: w * 0.42, y: h * 0.34), control: CGPoint(x: w * 0.42, y: h * 0.14))
@@ -651,8 +436,7 @@ private struct WhatsAppPhoneShape: Shape {
 
 private struct FacebookFShape: Shape {
     func path(in rect: CGRect) -> Path {
-        let w = rect.width
-        let h = rect.height
+        let w = rect.width, h = rect.height
         var p = Path()
         p.move(to: CGPoint(x: w * 0.64, y: h * 0.98))
         p.addLine(to: CGPoint(x: w * 0.64, y: h * 0.54))
@@ -660,19 +444,11 @@ private struct FacebookFShape: Shape {
         p.addLine(to: CGPoint(x: w * 0.97, y: h * 0.36))
         p.addLine(to: CGPoint(x: w * 0.64, y: h * 0.36))
         p.addLine(to: CGPoint(x: w * 0.64, y: h * 0.24))
-        p.addCurve(
-            to: CGPoint(x: w * 0.82, y: h * 0.16),
-            control1: CGPoint(x: w * 0.64, y: h * 0.19),
-            control2: CGPoint(x: w * 0.68, y: h * 0.16)
-        )
+        p.addCurve(to: CGPoint(x: w * 0.82, y: h * 0.16), control1: CGPoint(x: w * 0.64, y: h * 0.19), control2: CGPoint(x: w * 0.68, y: h * 0.16))
         p.addLine(to: CGPoint(x: w * 0.98, y: h * 0.16))
         p.addLine(to: CGPoint(x: w * 0.98, y: h * 0.02))
         p.addLine(to: CGPoint(x: w * 0.74, y: h * 0.02))
-        p.addCurve(
-            to: CGPoint(x: w * 0.36, y: h * 0.24),
-            control1: CGPoint(x: w * 0.49, y: h * 0.02),
-            control2: CGPoint(x: w * 0.36, y: h * 0.11)
-        )
+        p.addCurve(to: CGPoint(x: w * 0.36, y: h * 0.24), control1: CGPoint(x: w * 0.49, y: h * 0.02), control2: CGPoint(x: w * 0.36, y: h * 0.11))
         p.addLine(to: CGPoint(x: w * 0.36, y: h * 0.36))
         p.addLine(to: CGPoint(x: w * 0.12, y: h * 0.36))
         p.addLine(to: CGPoint(x: w * 0.12, y: h * 0.54))
