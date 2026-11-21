@@ -260,7 +260,7 @@ private final class NaiseTranscoder: @unchecked Sendable {
         }
 
         // ---- Writer ----
-        let writer = try AVAssetWriter(outputURL: outputURL, outputFileType: .mp4)
+        let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
         writer.shouldOptimizeForNetworkUse = true   // faststart → upload cepat mula
 
         func videoSettings(codec: AVVideoCodecType, bitrate: Int) -> [String: Any] {
@@ -303,7 +303,7 @@ private final class NaiseTranscoder: @unchecked Sendable {
                 kCVPixelBufferWidthKey as String: Int(outW),
                 kCVPixelBufferHeightKey as String: Int(outH),
                 kCVPixelBufferMetalCompatibilityKey as String: true,
-                kCVPixelBufferIOSurfacePropertiesKey as String: [:]
+                kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any]()
             ]
         )
         guard writer.canAdd(vInput) else { throw NaiseError.cannotStartWriter("video input") }
@@ -1058,7 +1058,7 @@ struct ContentView: View {
             statusTitle = "Export ready"
             statusDetail = "\(plan.summary) · Save to Photos"
             appendLog("Ready · \(plan.summary)")
-        } catch let error as NaiseError where { if case .cancelled = error { return true } else { return false } }() {
+        } catch NaiseError.cancelled {
             cleanupTempFile(outputURL)
             currentStep = .profile
             statusTitle = "Cancelled"
