@@ -3,7 +3,7 @@ import Foundation
 // Naise+ FFmpeg server connector: upload -> poll -> download.
 enum NaiseServerEngine {
     // Update this URL whenever Cloudflare Quick Tunnel restarts.
-    static let baseURL = "https://gift-mpeg-peoples-grace.trycloudflare.com"
+    static let baseURL = "https://gate-mpeg-peoples-grace.trycloudflare.com"
     static let apiKey = ""
 
     private struct CreatedJob: Decodable {
