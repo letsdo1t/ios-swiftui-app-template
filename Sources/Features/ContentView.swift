@@ -603,8 +603,10 @@ struct ContentView: View {
     @State private var exportError: String?
     @State private var platform = "Instagram"
     @State private var resolution = "1080p"
-    @State private var fps = "30 FPS"
-    @State private var upscale = true
+    @State private var fps = "60 FPS"
+    @State private var savedToPhotos = false
+    @State private var isSavingToPhotos = false
+    @State private var upscale = false
     @State private var useAI = false
     @State private var detail = "Crisp"
     @State private var shareItem: ShareItem?
@@ -631,8 +633,8 @@ struct ContentView: View {
     private var segmentWell: Color { isLightMode ? Color.white.opacity(0.55) : Color.black.opacity(0.28) }
 
     private let platforms = ["Instagram", "TikTok", "WhatsApp", "Facebook"]
-    private let resolutions = ["720p", "1080p", "4K"]
-    private let rates = ["30 FPS", "60 FPS"]
+    private let resolutions = ["1080p", "4K"]
+    private let rates = ["60 FPS"]
     private let detailLevels = ["Natural", "Crisp", "Strong"]
     private let partLengths = ["30s", "60s", "Off"]
 
@@ -653,15 +655,14 @@ struct ContentView: View {
     private var fpsDetail: String {
         guard let info = sourceInfo else { return "Never above source fps" }
         let src = Int(info.fps.rounded())
-        let req = fps == "60 FPS" ? 60 : 30
-        return req >= src ? "Source \(src) fps · kept" : "\(src) → \(req) fps"
+        return src >= 60 ? "Source \(src) FPS" : "Source \(src) → target 60 FPS"
     }
 
     private var currentSettings: EnhanceSettings {
         EnhanceSettings(
             platform: platform,
             resolution: resolution,
-            requestedFPS: fps == "60 FPS" ? 60 : 30,
+            requestedFPS: 60,
             upscale: upscale,
             useAI: useAI,
             detail: detailMultiplier
@@ -680,15 +681,8 @@ struct ContentView: View {
 
     /// Preview output sebenar sebelum render
     private var plannedSummary: String {
-        guard let info = sourceInfo else { return "\(resolution) · \(fps)" }
-        let layout = partPlan(total: info.durationSeconds, partSeconds: partSeconds)
-        let plan = planExport(
-            orientedSize: CGSize(width: info.width, height: info.height),
-            sourceFPS: info.fps,
-            settings: currentSettings,
-            durationSeconds: layout.each
-        )
-        return "Output \(plan.summary)" + (layout.count > 1 ? " · \(layout.count) parts" : "")
+        guard let info = sourceInfo else { return "\(resolution) · 60 FPS" }
+        return "Target \(resolution) · 60 FPS · Source \(Int(info.fps.rounded())) FPS"
     }
 
     private var detailText: String {
@@ -698,40 +692,56 @@ struct ContentView: View {
     var body: some View {
         GeometryReader { geometry in
             ScrollView(showsIndicators: false) {
-                VStack(spacing: 0) {
-                    header.padding(.top, 10)
-                    importArea.padding(.top, 12)
-                    clearStatusCard.padding(.top, 10)
-                    settingsPanel.padding(.top, 10)
-                    Spacer(minLength: 12)
-                    exportButton
-
-                    if !exportedURLs.isEmpty {
-                        HStack(spacing: 8) {
-                            secondaryButton("Save to Photos", icon: "photo.badge.plus") {
-                                Task { await saveToPhotos() }
-                            }
-                            secondaryButton("Share / Files", icon: "square.and.arrow.up") {
-                                shareItem = ShareItem(urls: exportedURLs)
-                            }
-                        }
-                        .padding(.top, 8)
-                    }
-
+                VStack(spacing: 7) {
+                    header
+                    importArea
+                    clearStatusCard
+                    settingsPanel
                     if let exportError {
                         Text(exportError)
                             .font(.caption2)
                             .foregroundStyle(.red)
-                            .lineLimit(3)
+                            .lineLimit(2)
                             .multilineTextAlignment(.center)
-                            .padding(.top, 5)
                     }
                 }
-                .padding(.horizontal, 20)
-                .padding(.bottom, 10)
+                .padding(.horizontal, 16)
+                .padding(.top, 4)
+                .padding(.bottom, 6)
                 .frame(maxWidth: 500)
                 .frame(width: geometry.size.width)
-                .frame(minHeight: geometry.size.height, alignment: .top)
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                VStack(spacing: 6) {
+                    exportButton
+                    if !exportedURLs.isEmpty {
+                        HStack(spacing: 8) {
+                            Button {
+                                Task { await saveToPhotos() }
+                            } label: {
+                                Label(savedToPhotos ? "Saved to Photos" : (isSavingToPhotos ? "Saving…" : "Save to Photos"),
+                                      systemImage: savedToPhotos ? "checkmark.circle.fill" : "photo.badge.plus")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 10)
+                                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(glassBorder, lineWidth: 1))
+                            }
+                            .disabled(savedToPhotos || isSavingToPhotos || isProcessing)
+                            .opacity(savedToPhotos ? 0.7 : 1)
+                            secondaryButton("Share / Files", icon: "square.and.arrow.up") {
+                                shareItem = ShareItem(urls: exportedURLs)
+                            }
+                        }
+                    }
+                }
+                .foregroundStyle(activeAccent)
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+                .padding(.bottom, 5)
+                .frame(maxWidth: 500)
+                .frame(maxWidth: .infinity)
+                .background(.ultraThinMaterial)
             }
             .background {
                 ZStack {
@@ -771,7 +781,7 @@ struct ContentView: View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Naise+")
-                    .font(.system(size: 27, weight: .bold, design: .rounded))
+                    .font(.system(size: 24, weight: .bold, design: .rounded))
                 Text("AI Video Enhancer")
                     .font(.system(size: 12))
                     .foregroundStyle(mutedText)
@@ -782,11 +792,11 @@ struct ContentView: View {
 
     private var importArea: some View {
         PhotosPicker(selection: $selectedVideo, matching: .videos) {
-            VStack(spacing: 7) {
+            VStack(spacing: 3) {
                 Image(systemName: videoURL == nil ? "plus" : "checkmark")
                     .font(.system(size: 19, weight: .semibold))
                     .foregroundStyle(activeAccent)
-                    .frame(width: 40, height: 40)
+                    .frame(width: 29, height: 29)
                     .background(cyanAccent.opacity(0.18), in: Circle())
                 Text(videoURL == nil ? "Import Video" : "Change Video")
                     .font(.system(size: 16, weight: .semibold))
@@ -794,7 +804,7 @@ struct ContentView: View {
                     .font(.system(size: 11)).foregroundStyle(mutedText)
             }
             .frame(maxWidth: .infinity)
-            .frame(height: 124)
+            .frame(height: 78)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
             .overlay {
                 RoundedRectangle(cornerRadius: 20)
@@ -813,7 +823,7 @@ struct ContentView: View {
     }
 
     private var clearStatusCard: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 8) {
                 Circle()
                     .fill(exportError != nil ? Color.red : (isProcessing || videoURL != nil ? activeAccent : mutedText))
@@ -864,7 +874,7 @@ struct ContentView: View {
                 .lineLimit(1)
 
             VStack(alignment: .leading, spacing: 2) {
-                ForEach(logs.suffix(2)) { entry in
+                ForEach(logs.suffix(1)) { entry in
                     HStack(spacing: 6) {
                         Text(entry.timeText)
                             .font(.system(size: 9, weight: .bold, design: .monospaced))
@@ -878,14 +888,14 @@ struct ContentView: View {
             }
         }
         .padding(.horizontal, 13)
-        .padding(.vertical, 9)
+        .padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(glassBorder, lineWidth: 1))
     }
 
     private var settingsPanel: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 6) {
             sectionHeading("PLATFORM", detail: platform, highlight: true)
             HStack(spacing: 6) {
                 ForEach(platforms, id: \.self) { name in
@@ -898,64 +908,50 @@ struct ContentView: View {
                     } label: {
                         SocialPlatformLogo(platform: name)
                             .frame(maxWidth: .infinity)
-                            .frame(height: 34)
+                            .frame(height: 30)
                             .foregroundStyle(isSelected ? activeAccent : mutedText)
                             .background(isSelected ? cyanAccent.opacity(0.2) : Color.clear)
-                            .clipShape(RoundedRectangle(cornerRadius: 10))
-                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(isSelected ? cyanAccent.opacity(0.65) : Color.clear, lineWidth: 1))
+                            .clipShape(RoundedRectangle(cornerRadius: 9))
+                            .overlay(RoundedRectangle(cornerRadius: 9).stroke(isSelected ? cyanAccent.opacity(0.65) : Color.clear, lineWidth: 1))
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(name)
                 }
             }
-            .padding(4)
-            .background(segmentWell, in: RoundedRectangle(cornerRadius: 13))
+            .padding(3)
+            .background(segmentWell, in: RoundedRectangle(cornerRadius: 12))
 
             Divider().overlay(glassBorder)
             sectionHeading("RESOLUTION", detail: resolutionDetail)
             choiceRow(resolutions, selection: $resolution, labelPrefix: "Res")
 
             Divider().overlay(glassBorder)
-            sectionHeading("MAX FRAME RATE", detail: fpsDetail)
-            choiceRow(rates, selection: $fps, labelPrefix: "FPS")
+            HStack {
+                Text("FRAME RATE").font(.system(size: 10, weight: .semibold)).tracking(1.2).foregroundStyle(mutedText)
+                Spacer()
+                Label("60 FPS LOCKED", systemImage: "lock.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(activeAccent)
+            }
 
-            Divider().overlay(glassBorder)
-            sectionHeading("DETAIL", detail: detail == "Strong" ? "Max sharpen" : (detail == "Crisp" ? "Balanced" : "Subtle"))
-            choiceRow(detailLevels, selection: $detail, labelPrefix: "Detail")
-
+            // Detail, Upscale and AI Super Resolution intentionally omitted.
+            // Existing server handles encoding; no extra enhancement is requested.
             if platform == "WhatsApp" {
                 Divider().overlay(glassBorder)
-                sectionHeading("SPLIT LONG CLIPS", detail: partLength == "Off" ? "Single file" : "Parts up to \(partLength)")
-                choiceRow(partLengths, selection: $partLength, labelPrefix: "Split")
-            }
-
-            Divider().overlay(glassBorder)
-            HStack {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("UPSCALE TO TARGET").font(.system(size: 10, weight: .semibold)).tracking(1.2).foregroundStyle(mutedText)
-                    Text("Lanczos resize, keeps more detail after IG/TikTok re-compress")
-                        .font(.system(size: 10)).foregroundStyle(mutedText).lineLimit(1)
-                }
-                Spacer()
-                Toggle("", isOn: $upscale).labelsHidden().tint(cyanAccent)
-            }
-
-            if #available(iOS 26.0, *) {
-                Divider().overlay(glassBorder)
                 HStack {
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("AI SUPER RESOLUTION").font(.system(size: 10, weight: .semibold)).tracking(1.2).foregroundStyle(mutedText)
-                        Text("On-device ML · best for 720p or lower clips · auto-falls back")
-                            .font(.system(size: 10)).foregroundStyle(mutedText).lineLimit(1)
-                    }
+                    Text("SPLIT LONG CLIPS").font(.system(size: 10, weight: .semibold)).foregroundStyle(mutedText)
                     Spacer()
-                    Toggle("", isOn: $useAI).labelsHidden().tint(cyanAccent)
+                    Picker("Split", selection: $partLength) {
+                        ForEach(partLengths, id: \.self) { length in Text(length).tag(length) }
+                    }
+                    .pickerStyle(.menu)
+                    .tint(activeAccent)
                 }
             }
         }
-        .padding(12)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
-        .overlay(RoundedRectangle(cornerRadius: 20).stroke(glassBorder, lineWidth: 1))
+        .padding(10)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(glassBorder, lineWidth: 1))
         .disabled(isProcessing)
     }
 
@@ -988,7 +984,7 @@ struct ContentView: View {
                     Text(option)
                         .font(.system(size: 13, weight: .semibold))
                         .frame(maxWidth: .infinity)
-                        .frame(height: 34)
+                        .frame(height: 30)
                         .foregroundStyle(isSelected ? activeAccent : mutedText)
                         .background(isSelected ? cyanAccent.opacity(0.2) : Color.clear)
                         .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -1019,7 +1015,7 @@ struct ContentView: View {
             }
             .font(.system(size: 15, weight: .bold))
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 14)
+            .padding(.vertical, 11)
             .background(LinearGradient(colors: [cyanAccent, indigoAccent], startPoint: .leading, endPoint: .trailing))
             .clipShape(Capsule())
         }
@@ -1047,6 +1043,8 @@ struct ContentView: View {
 private func loadVideo(_ item: PhotosPickerItem?) async {
     cleanupTempFile(videoURL)
     cleanupExported()
+    savedToPhotos = false
+    isSavingToPhotos = false
 
     videoURL = nil
     sourceInfo = nil
@@ -1130,6 +1128,8 @@ private func exportVideo() async {
     guard let videoURL else { return }
 
     cleanupExported()
+    savedToPhotos = false
+    isSavingToPhotos = false
     isProcessing = true
     exportError = nil
     renderProgress = 0
@@ -1149,7 +1149,7 @@ private func exportVideo() async {
         let output = try await NaiseServerEngine.process(
             videoURL: videoURL,
             resolution: resolution,
-            fps: fps == "60 FPS" ? 60 : 30
+            fps: 60
         )
 
         exportedURLs = [output]
@@ -1169,22 +1169,19 @@ private func exportVideo() async {
 
     @MainActor
     private func saveToPhotos() async {
+        guard !savedToPhotos && !isSavingToPhotos && !isProcessing else { return }
         let urls = exportedURLs
         guard !urls.isEmpty else { return }
-        // Tanpa key ni iOS akan crash app terus masa minta kebenaran Photos
+        isSavingToPhotos = true
+        defer { isSavingToPhotos = false }
+
         guard Bundle.main.object(forInfoDictionaryKey: "NSPhotoLibraryAddUsageDescription") != nil else {
-            // Key belum ada dalam Info.plist → guna share sheet sistem (tak perlukan kebenaran).
-            // Pilih "Save Video" dalam sheet tu.
-            exportError = nil
-            shareItem = ShareItem(urls: urls)
-            statusTitle = "Tap Save Video"
-            statusDetail = "In the share sheet, choose Save Video"
-            appendLog("Share sheet opened (no Info.plist key)")
+            exportError = "Photos permission description is missing from Info.plist."
             return
         }
-        let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-        guard status == .authorized || status == .limited else {
-            exportError = "Allow Photos access (Add Photos only) in Settings to save the video."
+        let authorization = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        guard authorization == .authorized || authorization == .limited else {
+            exportError = "Allow Photos access (Add Photos only) in Settings."
             return
         }
         do {
@@ -1193,12 +1190,11 @@ private func exportVideo() async {
                     _ = PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
                 }
             }
+            savedToPhotos = true
             exportError = nil
-            statusTitle = "Saved to Photos"
-            statusDetail = urls.count > 1
-                ? "\(urls.count) parts saved. Post them one by one from your library"
-                : "Open the app and pick it from your library"
-            appendLog("Saved to Photos")
+            statusTitle = "Video Saved Successfully ✓"
+            statusDetail = urls.count > 1 ? "\(urls.count) videos saved to Photos" : "Your video is in Photos"
+            appendLog("Video Saved Successfully")
         } catch {
             exportError = error.localizedDescription
             appendLog("Save to Photos failed")
