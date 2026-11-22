@@ -1,27 +1,31 @@
 import Foundation
 
-// Naise+ private FFmpeg server connector.
-// Put this file in Sources/Features/NaiseServerEngine.swift.
+// Naise+ FFmpeg server connector: upload -> poll -> download.
 enum NaiseServerEngine {
-    // Cloudflare Quick Tunnel addresses change when the tunnel restarts.
+    // Update this URL whenever Cloudflare Quick Tunnel restarts.
     static let baseURL = "https://enjoy-damages-farm-colours.trycloudflare.com"
-    static let apiKey = "" // Set only if NAISE_API_TOKEN is enabled on the PC.
+    static let apiKey = ""
+
+    private struct CreatedJob: Decodable {
+        let job_id: String
+    }
+
+    private struct JobStatus: Decodable {
+        let state: String
+        let progress: Int
+        let error: String?
+    }
 
     static func process(videoURL: URL, resolution: String, fps: Int) async throws -> URL {
-        guard let endpoint = URL(string: baseURL + "/process") else {
-            throw EngineError.message("Invalid server URL")
-        }
         let boundary = "NaiseBoundary-\(UUID().uuidString)"
         let bodyURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString).appendingPathExtension("upload")
         defer { try? FileManager.default.removeItem(at: bodyURL) }
-
         guard FileManager.default.createFile(atPath: bodyURL.path, contents: nil) else {
             throw EngineError.message("Cannot create upload file")
         }
         let handle = try FileHandle(forWritingTo: bodyURL)
         defer { try? handle.close() }
-
         func write(_ text: String) throws {
             try handle.write(contentsOf: Data(text.utf8))
         }
@@ -35,7 +39,6 @@ enum NaiseServerEngine {
         try write("--\(boundary)\r\n")
         try write("Content-Disposition: form-data; name=\"video\"; filename=\"clip.mov\"\r\n")
         try write("Content-Type: application/octet-stream\r\n\r\n")
-
         let input = try FileHandle(forReadingFrom: videoURL)
         defer { try? input.close() }
         while true {
@@ -45,30 +48,71 @@ enum NaiseServerEngine {
         }
         try write("\r\n--\(boundary)--\r\n")
         try handle.synchronize()
-
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "POST"
-        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        if !apiKey.isEmpty { request.setValue(apiKey, forHTTPHeaderField: "x-api-key") }
-        request.timeoutInterval = 660
+        try handle.close()
 
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 660
-        config.timeoutIntervalForResource = 900
+        config.timeoutIntervalForRequest = 120
+        config.timeoutIntervalForResource = 300
         let session = URLSession(configuration: config)
         defer { session.invalidateAndCancel() }
-        let (data, response) = try await session.upload(for: request, fromFile: bodyURL)
+
+        var upload = try request(path: "/process")
+        upload.httpMethod = "POST"
+        upload.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        let (createdData, createdResponse) = try await session.upload(for: upload, fromFile: bodyURL)
+        try validate(createdResponse, data: createdData, expected: 202)
+        let jobID = try JSONDecoder().decode(CreatedJob.self, from: createdData).job_id
+
+        // A job can take several minutes; each poll is a short HTTP request.
+        for _ in 0..<360 {
+            try Task.checkCancellation()
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+            let (data, response) = try await session.data(for: request(path: "/jobs/\(jobID)"))
+            try validate(response, data: data, expected: 200)
+            let status = try JSONDecoder().decode(JobStatus.self, from: data)
+            switch status.state {
+            case "ready":
+                let (tempURL, downloadResponse) = try await session.download(
+                    for: request(path: "/jobs/\(jobID)/download")
+                )
+                guard let http = downloadResponse as? HTTPURLResponse, http.statusCode == 200 else {
+                    throw EngineError.message("Download failed")
+                }
+                let output = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("NaisePlus_\(UUID().uuidString)")
+                    .appendingPathExtension("mp4")
+                try FileManager.default.moveItem(at: tempURL, to: output)
+                return output
+            case "failed":
+                throw EngineError.message(status.error ?? "Video processing failed")
+            case "queued", "processing":
+                continue
+            default:
+                throw EngineError.message("Unknown job state: \(status.state)")
+            }
+        }
+        throw EngineError.message("Job status polling timed out")
+    }
+
+    private static func request(path: String) throws -> URLRequest {
+        guard let url = URL(string: baseURL + path) else {
+            throw EngineError.message("Invalid server URL")
+        }
+        var request = URLRequest(url: url)
+        if !apiKey.isEmpty {
+            request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        }
+        return request
+    }
+
+    private static func validate(_ response: URLResponse, data: Data, expected: Int) throws {
         guard let http = response as? HTTPURLResponse else {
             throw EngineError.message("No HTTP response from server")
         }
-        guard http.statusCode == 200 else {
-            let detail = String(data: data.prefix(700), encoding: .utf8) ?? "Unknown error"
+        guard http.statusCode == expected else {
+            let detail = String(data: data.prefix(500), encoding: .utf8) ?? "Unknown error"
             throw EngineError.message("Server HTTP \(http.statusCode): \(detail)")
         }
-        let output = FileManager.default.temporaryDirectory
-            .appendingPathComponent("NaisePlus_\(UUID().uuidString)").appendingPathExtension("mp4")
-        try data.write(to: output, options: .atomic)
-        return output
     }
 
     enum EngineError: LocalizedError {
