@@ -1,9 +1,7 @@
 import SwiftUI
 import PhotosUI
 import Photos
-import AVFoundationwithAnimation(.snappy(duration: 0.22)) {
-    // Theme follows the system appearance
-}
+import AVFoundation
 import CoreImage
 import CoreImage.CIFilterBuiltins
 import UIKit
@@ -795,8 +793,8 @@ struct ContentView: View {
         let isSelected = isLightMode == lightTarget
         return Button {
             withAnimation(.snappy(duration: 0.22)) {
-    // Theme follows the system appearance
-}
+                isLightMode = lightTarget
+            }
         } label: {
             Image(systemName: icon)
                 .font(.system(size: 13, weight: .semibold))
