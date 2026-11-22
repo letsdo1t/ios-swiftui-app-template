@@ -1059,7 +1059,76 @@ struct ContentView: View {
         for url in exportedURLs { try? FileManager.default.removeItem(at: url) }
         exportedURLs = []
     }
+    @MainActor
+private func loadVideo(_ item: PhotosPickerItem?) async {
+    cleanupTempFile(videoURL)
+    cleanupExported()
 
+    videoURL = nil
+    sourceInfo = nil
+    exportError = nil
+    renderProgress = 0
+
+    guard let item else {
+        currentStep = .importClip
+        statusTitle = "Ready to import"
+        statusDetail = "Select a video from Photos"
+        return
+    }
+
+    currentStep = .importClip
+    statusTitle = "Importing clip"
+    statusDetail = "Loading video from Photos..."
+
+    do {
+        guard let picked = try await item.loadTransferable(
+            type: PickedVideo.self
+        ) else {
+            statusTitle = "Import failed"
+            statusDetail = "Unable to load video"
+            return
+        }
+
+        let url = picked.url
+        let asset = AVURLAsset(url: url)
+
+        guard let track = try await asset
+            .loadTracks(withMediaType: .video).first else {
+            cleanupTempFile(url)
+            throw NaiseError.noVideoTrack
+        }
+
+        let naturalSize = try await track.load(.naturalSize)
+        let transform = try await track.load(.preferredTransform)
+        let duration = try await asset.load(.duration)
+        let nominalFPS = try await track.load(.nominalFrameRate)
+
+        let rect = CGRect(
+            origin: .zero,
+            size: naturalSize
+        ).applying(transform)
+
+        sourceInfo = SourceClipInfo(
+            width: Int(abs(rect.width)),
+            height: Int(abs(rect.height)),
+            durationSeconds: max(0, CMTimeGetSeconds(duration)),
+            fps: nominalFPS > 0 ? Double(nominalFPS) : 30
+        )
+
+        videoURL = url
+        currentStep = .profile
+        statusTitle = "Source ready"
+        statusDetail = sourceInfo?.summary ?? "Video loaded"
+
+        appendLog("Video imported successfully")
+
+    } catch {
+        exportError = error.localizedDescription
+        statusTitle = "Import failed"
+        statusDetail = "Try another video"
+        appendLog("Import error")
+    }
+}
     /// Saiz fail terbesar (setiap bahagian), untuk semak had saiz WhatsApp
     private func fileSizeText(_ urls: [URL]) -> String {
         var largest: Int64 = 0
