@@ -1073,127 +1073,46 @@ struct ContentView: View {
     }
 
     @MainActor
-    private func loadVideo(_ item: PhotosPickerItem?) async {
-        cleanupTempFile(videoURL)
-        cleanupExported()
-        videoURL = nil
-        sourceInfo = nil
-        exportError = nil
-        renderProgress = 0
+private func exportVideo() async {
+    guard let videoURL else { return }
 
-        guard let item else {
-            currentStep = .importClip
-            statusTitle = "Ready to import"
-            statusDetail = "Select a clean clip for Story / Reels"
-            appendLog("Cleared clip")
-            return
-        }
+    cleanupExported()
+    isProcessing = true
+    exportError = nil
+    renderProgress = 0
+    currentStep = .render
+    statusTitle = "Uploading & Processing"
+    statusDetail = "FFmpeg server is processing your video"
+    appendLog("Connecting to Naise+ server")
 
-        currentStep = .importClip
-        statusTitle = "Importing clip"
-        statusDetail = "Loading video from Photos..."
-        appendLog("Importing clip")
+    UIApplication.shared.isIdleTimerDisabled = true
 
-        do {
-            guard let picked = try await item.loadTransferable(type: PickedVideo.self) else {
-                statusTitle = "Import unavailable"
-                statusDetail = "Could not read video data"
-                appendLog("Empty video data")
-                return
-            }
-            let url = picked.url
-            let asset = AVURLAsset(url: url)
-            guard let track = try await asset.loadTracks(withMediaType: .video).first else {
-                cleanupTempFile(url)
-                statusTitle = "Import failed"
-                statusDetail = "No video track in this file"
-                appendLog("No video track")
-                return
-            }
-            let nat = try await track.load(.naturalSize)
-            let tf = try await track.load(.preferredTransform)
-            let tr = try await track.load(.timeRange)
-            let rate = try await track.load(.nominalFrameRate)
-            let rect = CGRect(origin: .zero, size: nat).applying(tf)
-            sourceInfo = SourceClipInfo(
-                width: Int(abs(rect.width)),
-                height: Int(abs(rect.height)),
-                durationSeconds: max(0, CMTimeGetSeconds(tr.duration)),
-                fps: rate > 0 ? Double(rate) : 30
-            )
-
-            videoURL = url
-            currentStep = .profile
-            statusTitle = "Source ready"
-            statusDetail = sourceInfo?.summary ?? "Clip loaded"
-            appendLog("Loaded \(sourceInfo?.summary ?? "video")")
-        } catch {
-            exportError = error.localizedDescription
-            statusTitle = "Import failed"
-            statusDetail = "Try another clip"
-            appendLog("Import error")
-        }
+    defer {
+        isProcessing = false
+        UIApplication.shared.isIdleTimerDisabled = false
     }
 
-    @MainActor
-    private func exportVideo() async {
-        guard let videoURL else {
-            statusTitle = "No clip selected"
-            statusDetail = "Import a video first"
-            return
-        }
+    do {
+        let output = try await NaiseServerEngine.process(
+            videoURL: videoURL,
+            resolution: resolution,
+            fps: fps == "60 FPS" ? 60 : 30
+        )
 
-        cleanupExported()
-        isProcessing = true
-        exportError = nil
-        renderProgress = 0
-        currentStep = .render
-        statusTitle = "Rendering"
-        statusDetail = "Keep the app open until it finishes"
-        appendLog("Export \(resolution) (\(platform))")
-
-        // Jangan biar skrin tidur masa render
-        UIApplication.shared.isIdleTimerDisabled = true
-        let transcoder = NaiseTranscoder()
-        activeTranscoder = transcoder
-
-        defer {
-            isProcessing = false
-            activeTranscoder = nil
-            UIApplication.shared.isIdleTimerDisabled = false
-        }
-
-        do {
-            let result = try await transcoder.export(
-                inputURL: videoURL,
-                outputDirectory: FileManager.default.temporaryDirectory,
-                settings: currentSettings,
-                partSeconds: partSeconds,
-                onProgress: { p in
-                    Task { @MainActor in renderProgress = p }
-                }
-            )
-            exportedURLs = result.urls
-            renderProgress = 1
-            currentStep = .ready
-            let partsText = result.urls.count > 1 ? " · \(result.urls.count) parts" : ""
-            let sizeText = fileSizeText(result.urls)
-            statusTitle = "Export ready"
-            statusDetail = "\(result.plan.summary)\(partsText)" + (sizeText.isEmpty ? "" : " · \(sizeText)")
-            appendLog("Ready · \(result.plan.summary)\(partsText)")
-        } catch NaiseError.cancelled {
-            currentStep = .profile
-            statusTitle = "Cancelled"
-            statusDetail = "Adjust settings and retry"
-            appendLog("Export cancelled")
-        } catch {
-            exportError = error.localizedDescription
-            currentStep = .profile
-            statusTitle = "Export failed"
-            statusDetail = "Adjust settings and retry"
-            appendLog("Failed: \(error.localizedDescription)")
-        }
+        exportedURLs = [output]
+        renderProgress = 1
+        currentStep = .ready
+        statusTitle = "Export ready"
+        statusDetail = "Server processed MP4 · \(fileSizeText([output]))"
+        appendLog("FFmpeg processing completed")
+    } catch {
+        exportError = error.localizedDescription
+        currentStep = .profile
+        statusTitle = "Export failed"
+        statusDetail = "Check server and Cloudflare connection"
+        appendLog("Server error: \(error.localizedDescription)")
     }
+}
 
     @MainActor
     private func saveToPhotos() async {
