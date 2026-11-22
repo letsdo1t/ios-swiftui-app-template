@@ -4,6 +4,7 @@ import Photos
 import AVFoundation
 import CoreImage
 import CoreImage.CIFilterBuiltins
+import UIKit
 import UniformTypeIdentifiers
 
 // MARK: - Models
@@ -73,6 +74,7 @@ private struct EnhanceSettings {
     var requestedFPS: Int
     var upscale: Bool
     var useAI: Bool
+    var detail: Double = 1.0     // pengganda sharpen: Natural 0.6 / Crisp 1.0 / Strong 1.8
 }
 
 private struct ExportPlan {
@@ -81,13 +83,14 @@ private struct ExportPlan {
     let bitrate: Int          // bits per second
     let upscaled: Bool
     var usedAI = false
+    var aiRequested = false
 
     var summary: String {
-        "\(Int(outputSize.width))×\(Int(outputSize.height)) · \(fps)fps · \(String(format: "%.0f", Double(bitrate) / 1_000_000)) Mbps" + (usedAI ? " · AI" : "")
+        "\(Int(outputSize.width))×\(Int(outputSize.height)) · \(fps)fps · \(String(format: "%.1f", Double(bitrate) / 1_000_000)) Mbps" + (usedAI ? " · AI" : (aiRequested ? " · AI skipped" : ""))
     }
 }
 
-private func planExport(orientedSize: CGSize, sourceFPS: Double, settings: EnhanceSettings) -> ExportPlan {
+private func planExport(orientedSize: CGSize, sourceFPS: Double, settings: EnhanceSettings, durationSeconds: Double) -> ExportPlan {
     // "4K" = sisi panjang 3840 (versi lama tersilap 2160)
     var targetLong: CGFloat = switch settings.resolution {
     case "720p": 1280
@@ -117,6 +120,11 @@ private func planExport(orientedSize: CGSize, sourceFPS: Double, settings: Enhan
     var bitrate = pixels * 30.0 * 0.19 * fpsScale
     if settings.platform == "WhatsApp" { bitrate *= 0.75 }
     bitrate = min(45_000_000, max(3_000_000, bitrate))
+    if settings.platform == "WhatsApp" {
+        // Kekalkan setiap fail di bawah ~14 MB (selamat bawah had 16 MB yang sering disebut)
+        let cap = (14_000_000.0 * 8.0) / max(1.0, durationSeconds) - 192_000.0
+        bitrate = min(bitrate, max(900_000.0, cap))
+    }
 
     return ExportPlan(
         outputSize: CGSize(width: w, height: h),
@@ -124,6 +132,16 @@ private func planExport(orientedSize: CGSize, sourceFPS: Double, settings: Enhan
         bitrate: Int(bitrate),
         upscaled: scale > 1.001
     )
+}
+
+/// Bahagikan klip panjang kepada bahagian sama panjang (setiap satu ≤ partSeconds).
+/// partSeconds nil atau klip pendek → satu fail sahaja.
+private func partPlan(total: Double, partSeconds: Double?) -> (count: Int, each: Double) {
+    guard let partSeconds, partSeconds > 0, total > partSeconds + 0.5 else {
+        return (1, max(total, 0.01))
+    }
+    let count = Int((total / partSeconds).rounded(.up))
+    return (count, total / Double(count))
 }
 
 // MARK: - Transcoder (AVAssetReader → CoreImage/Metal → AVAssetWriter)
@@ -173,12 +191,55 @@ private final class NaiseTranscoder: @unchecked Sendable {
 
     func export(
         inputURL: URL,
-        outputURL: URL,
+        outputDirectory: URL,
         settings: EnhanceSettings,
+        partSeconds: Double?,
         onProgress: @escaping @Sendable (Double) -> Void
-    ) async throws -> ExportPlan {
+    ) async throws -> (urls: [URL], plan: ExportPlan) {
         try await withTaskCancellationHandler {
-            try await run(inputURL: inputURL, outputURL: outputURL, settings: settings, onProgress: onProgress)
+            let asset = AVURLAsset(url: inputURL)
+            let duration = try await asset.load(.duration)
+            let layout = partPlan(total: CMTimeGetSeconds(duration), partSeconds: partSeconds)
+
+            var urls: [URL] = []
+            var currentOutput: URL?
+            var lastResult: ExportPlan?
+
+            do {
+                for index in 0..<layout.count {
+                    let out = outputDirectory
+                        .appendingPathComponent("NaisePlus_\(UUID().uuidString)_p\(index + 1)")
+                        .appendingPathExtension("mp4")
+                    currentOutput = out
+
+                    var segment: CMTimeRange?
+                    if layout.count > 1 {
+                        segment = CMTimeRange(
+                            start: CMTime(seconds: layout.each * Double(index), preferredTimescale: 600),
+                            duration: CMTime(seconds: layout.each, preferredTimescale: 600)
+                        )
+                    }
+
+                    let finishedParts = Double(index)
+                    let allParts = Double(layout.count)
+                    lastResult = try await run(
+                        inputURL: inputURL,
+                        outputURL: out,
+                        settings: settings,
+                        segment: segment,
+                        onProgress: { p in onProgress((finishedParts + p) / allParts) }
+                    )
+                    urls.append(out)
+                    currentOutput = nil
+                }
+            } catch {
+                if let currentOutput { try? FileManager.default.removeItem(at: currentOutput) }
+                for url in urls { try? FileManager.default.removeItem(at: url) }
+                throw error
+            }
+
+            guard let finalPlan = lastResult else { throw NaiseError.failed("Nothing was exported") }
+            return (urls: urls, plan: finalPlan)
         } onCancel: {
             self.cancel()
         }
@@ -188,6 +249,7 @@ private final class NaiseTranscoder: @unchecked Sendable {
         inputURL: URL,
         outputURL: URL,
         settings: EnhanceSettings,
+        segment: CMTimeRange?,
         onProgress: @escaping @Sendable (Double) -> Void
     ) async throws -> ExportPlan {
         let asset = AVURLAsset(url: inputURL)
@@ -208,7 +270,15 @@ private final class NaiseTranscoder: @unchecked Sendable {
         guard orientedSize.width > 0, orientedSize.height > 0 else { throw NaiseError.invalidSize }
 
         let sourceFPS = nominalFPS > 0 ? nominalFPS : 30
-        let basePlan = planExport(orientedSize: orientedSize, sourceFPS: sourceFPS, settings: settings)
+        let activeRange: CMTimeRange = segment.map {
+            CMTimeRange(start: CMTimeAdd(timeRange.start, $0.start), duration: $0.duration)
+        } ?? timeRange
+        let basePlan = planExport(
+            orientedSize: orientedSize,
+            sourceFPS: sourceFPS,
+            settings: settings,
+            durationSeconds: max(0.01, CMTimeGetSeconds(activeRange.duration))
+        )
 
         // AI super-resolution (iOS 26+). Nil → automatik guna mod Clean.
         let aiStage: NaiseFrameUpscaler? = settings.useAI
@@ -220,6 +290,7 @@ private final class NaiseTranscoder: @unchecked Sendable {
             : nil
         var planWithAI = basePlan
         planWithAI.usedAI = (aiStage != nil)
+        planWithAI.aiRequested = settings.useAI
         let plan = planWithAI
         let outW = plan.outputSize.width, outH = plan.outputSize.height
         let outRect = CGRect(origin: .zero, size: plan.outputSize)
@@ -228,6 +299,7 @@ private final class NaiseTranscoder: @unchecked Sendable {
 
         // ---- Reader ----
         let reader = try AVAssetReader(asset: asset)
+        if segment != nil { reader.timeRange = activeRange }
 
         var vReadSettings: [String: Any] = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
@@ -327,11 +399,11 @@ private final class NaiseTranscoder: @unchecked Sendable {
         guard writer.startWriting() else {
             throw NaiseError.cannotStartWriter(writer.error?.localizedDescription ?? "unknown")
         }
-        let startTime = timeRange.start
+        let startTime = activeRange.start
         writer.startSession(atSourceTime: startTime)
 
         // ---- Per-frame pipeline ----
-        let totalSeconds = max(0.001, CMTimeGetSeconds(timeRange.duration))
+        let totalSeconds = max(0.001, CMTimeGetSeconds(activeRange.duration))
         let startSeconds = CMTimeGetSeconds(startTime)
         let interval = 1.0 / Double(plan.fps)
         let needsDrop = sourceFPS > Double(plan.fps) + 1.5   // contoh 60 → 30
@@ -342,7 +414,7 @@ private final class NaiseTranscoder: @unchecked Sendable {
             default: 0.18
             }
             if plan.upscaled { s += 0.06 }
-            return s
+            return min(1.2, s * settings.detail)
         }()
         let denoiseLevel: Float = plan.upscaled ? 0.015 : 0.008
         let allowDenoise = max(outW, outH) <= 2500    // 4K: skip, terlalu berat & tak perlu
@@ -514,8 +586,8 @@ struct ContentView: View {
     @State private var isLightMode = false
     @State private var selectedVideo: PhotosPickerItem?
     @State private var videoURL: URL?
-    @State private var exportedVideoURL: URL?
-    @State private var isShowingFileExporter = false
+    @State private var exportedURLs: [URL] = []
+    @State private var partLength = "30s"
     @State private var sourceInfo: SourceClipInfo?
     @State private var statusTitle = "Ready to import"
     @State private var statusDetail = "Select a clean clip for Story / Reels"
@@ -531,6 +603,8 @@ struct ContentView: View {
     @State private var fps = "30 FPS"
     @State private var upscale = true
     @State private var useAI = false
+    @State private var detail = "Crisp"
+    @State private var shareItem: ShareItem?
     @State private var activeTranscoder: NaiseTranscoder?
 
     private let darkBgTop = Color(red: 0.08, green: 0.14, blue: 0.24)
@@ -556,6 +630,8 @@ struct ContentView: View {
     private let platforms = ["Instagram", "TikTok", "WhatsApp", "Facebook"]
     private let resolutions = ["720p", "1080p", "4K"]
     private let rates = ["30 FPS", "60 FPS"]
+    private let detailLevels = ["Natural", "Crisp", "Strong"]
+    private let partLengths = ["30s", "60s", "Off"]
 
     private static let timeFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -563,19 +639,53 @@ struct ContentView: View {
         return f
     }()
 
+    private var detailMultiplier: Double {
+        switch detail {
+        case "Natural": return 0.6
+        case "Strong": return 1.8
+        default: return 1.0
+        }
+    }
+
+    private var fpsDetail: String {
+        guard let info = sourceInfo else { return "Never above source fps" }
+        let src = Int(info.fps.rounded())
+        let req = fps == "60 FPS" ? 60 : 30
+        return req >= src ? "Source \(src) fps · kept" : "\(src) → \(req) fps"
+    }
+
     private var currentSettings: EnhanceSettings {
-        EnhanceSettings(platform: platform, resolution: resolution, requestedFPS: fps == "60 FPS" ? 60 : 30, upscale: upscale, useAI: useAI)
+        EnhanceSettings(
+            platform: platform,
+            resolution: resolution,
+            requestedFPS: fps == "60 FPS" ? 60 : 30,
+            upscale: upscale,
+            useAI: useAI,
+            detail: detailMultiplier
+        )
+    }
+
+    /// WhatsApp: potong klip panjang kepada bahagian (macam PureStatus). Platform lain: satu fail.
+    private var partSeconds: Double? {
+        guard platform == "WhatsApp" else { return nil }
+        switch partLength {
+        case "30s": return 30
+        case "60s": return 60
+        default: return nil
+        }
     }
 
     /// Preview output sebenar sebelum render
     private var plannedSummary: String {
         guard let info = sourceInfo else { return "\(resolution) · \(fps)" }
+        let layout = partPlan(total: info.durationSeconds, partSeconds: partSeconds)
         let plan = planExport(
             orientedSize: CGSize(width: info.width, height: info.height),
             sourceFPS: info.fps,
-            settings: currentSettings
+            settings: currentSettings,
+            durationSeconds: layout.each
         )
-        return "Output \(plan.summary)"
+        return "Output \(plan.summary)" + (layout.count > 1 ? " · \(layout.count) parts" : "")
     }
 
     private var detailText: String {
@@ -593,13 +703,13 @@ struct ContentView: View {
                     Spacer(minLength: 12)
                     exportButton
 
-                    if exportedVideoURL != nil {
+                    if !exportedURLs.isEmpty {
                         HStack(spacing: 8) {
                             secondaryButton("Save to Photos", icon: "photo.badge.plus") {
                                 Task { await saveToPhotos() }
                             }
-                            secondaryButton("Files", icon: "folder.badge.plus") {
-                                isShowingFileExporter = true
+                            secondaryButton("Share / Files", icon: "square.and.arrow.up") {
+                                shareItem = ShareItem(urls: exportedURLs)
                             }
                         }
                         .padding(.top, 8)
@@ -637,21 +747,8 @@ struct ContentView: View {
         }
         .foregroundStyle(primaryText)
         .preferredColorScheme(isLightMode ? .light : .dark)
-        .fileExporter(
-            isPresented: $isShowingFileExporter,
-            document: ExportedVideoDocument(sourceURL: exportedVideoURL ?? URL(fileURLWithPath: "/dev/null")),
-            contentType: .mpeg4Movie,
-            defaultFilename: "NaisePlus_\(platform)_\(resolution)"
-        ) { result in
-            switch result {
-            case .success:
-                statusTitle = "Saved to Files"
-                statusDetail = "Video saved in Files app"
-                appendLog("Saved to Files app")
-            case .failure(let error):
-                exportError = error.localizedDescription
-                appendLog("Save to Files failed")
-            }
+        .sheet(item: $shareItem) { item in
+            ActivityView(urls: item.urls)
         }
     }
 
@@ -835,8 +932,18 @@ struct ContentView: View {
             choiceRow(resolutions, selection: $resolution, labelPrefix: "Res")
 
             Divider().overlay(glassBorder)
-            sectionHeading("MAX FRAME RATE", detail: fps == "60 FPS" ? "Smooth (if source ≥ 60)" : "Standard")
+            sectionHeading("MAX FRAME RATE", detail: fpsDetail)
             choiceRow(rates, selection: $fps, labelPrefix: "FPS")
+
+            Divider().overlay(glassBorder)
+            sectionHeading("DETAIL", detail: detail == "Strong" ? "Max sharpen" : (detail == "Crisp" ? "Balanced" : "Subtle"))
+            choiceRow(detailLevels, selection: $detail, labelPrefix: "Detail")
+
+            if platform == "WhatsApp" {
+                Divider().overlay(glassBorder)
+                sectionHeading("SPLIT LONG CLIPS", detail: partLength == "Off" ? "Single file" : "Parts up to \(partLength)")
+                choiceRow(partLengths, selection: $partLength, labelPrefix: "Split")
+            }
 
             Divider().overlay(glassBorder)
             HStack {
@@ -948,12 +1055,28 @@ struct ContentView: View {
         try? FileManager.default.removeItem(at: url)
     }
 
+    private func cleanupExported() {
+        for url in exportedURLs { try? FileManager.default.removeItem(at: url) }
+        exportedURLs = []
+    }
+
+    /// Saiz fail terbesar (setiap bahagian), untuk semak had saiz WhatsApp
+    private func fileSizeText(_ urls: [URL]) -> String {
+        var largest: Int64 = 0
+        for url in urls {
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+               let size = attrs[.size] as? NSNumber {
+                largest = max(largest, size.int64Value)
+            }
+        }
+        return largest > 0 ? String(format: "%.1f MB", Double(largest) / 1_048_576) : ""
+    }
+
     @MainActor
     private func loadVideo(_ item: PhotosPickerItem?) async {
         cleanupTempFile(videoURL)
-        cleanupTempFile(exportedVideoURL)
+        cleanupExported()
         videoURL = nil
-        exportedVideoURL = nil
         sourceInfo = nil
         exportError = nil
         renderProgress = 0
@@ -1020,8 +1143,7 @@ struct ContentView: View {
             return
         }
 
-        cleanupTempFile(exportedVideoURL)
-        exportedVideoURL = nil
+        cleanupExported()
         isProcessing = true
         exportError = nil
         renderProgress = 0
@@ -1041,33 +1163,30 @@ struct ContentView: View {
             UIApplication.shared.isIdleTimerDisabled = false
         }
 
-        let outputURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("NaisePlus_\(UUID().uuidString)")
-            .appendingPathExtension("mp4")
-
         do {
-            let plan = try await transcoder.export(
+            let result = try await transcoder.export(
                 inputURL: videoURL,
-                outputURL: outputURL,
+                outputDirectory: FileManager.default.temporaryDirectory,
                 settings: currentSettings,
+                partSeconds: partSeconds,
                 onProgress: { p in
                     Task { @MainActor in renderProgress = p }
                 }
             )
-            exportedVideoURL = outputURL
+            exportedURLs = result.urls
             renderProgress = 1
             currentStep = .ready
+            let partsText = result.urls.count > 1 ? " · \(result.urls.count) parts" : ""
+            let sizeText = fileSizeText(result.urls)
             statusTitle = "Export ready"
-            statusDetail = "\(plan.summary) · Save to Photos"
-            appendLog("Ready · \(plan.summary)")
+            statusDetail = "\(result.plan.summary)\(partsText)" + (sizeText.isEmpty ? "" : " · \(sizeText)")
+            appendLog("Ready · \(result.plan.summary)\(partsText)")
         } catch NaiseError.cancelled {
-            cleanupTempFile(outputURL)
             currentStep = .profile
             statusTitle = "Cancelled"
             statusDetail = "Adjust settings and retry"
             appendLog("Export cancelled")
         } catch {
-            cleanupTempFile(outputURL)
             exportError = error.localizedDescription
             currentStep = .profile
             statusTitle = "Export failed"
@@ -1078,11 +1197,17 @@ struct ContentView: View {
 
     @MainActor
     private func saveToPhotos() async {
-        guard let url = exportedVideoURL else { return }
+        let urls = exportedURLs
+        guard !urls.isEmpty else { return }
         // Tanpa key ni iOS akan crash app terus masa minta kebenaran Photos
         guard Bundle.main.object(forInfoDictionaryKey: "NSPhotoLibraryAddUsageDescription") != nil else {
-            exportError = "Missing NSPhotoLibraryAddUsageDescription in Info.plist. Add it, rebuild, then try again."
-            appendLog("Save blocked: Info.plist key missing")
+            // Key belum ada dalam Info.plist → guna share sheet sistem (tak perlukan kebenaran).
+            // Pilih "Save Video" dalam sheet tu.
+            exportError = nil
+            shareItem = ShareItem(urls: urls)
+            statusTitle = "Tap Save Video"
+            statusDetail = "In the share sheet, choose Save Video"
+            appendLog("Share sheet opened (no Info.plist key)")
             return
         }
         let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
@@ -1092,17 +1217,38 @@ struct ContentView: View {
         }
         do {
             try await PHPhotoLibrary.shared().performChanges {
-                _ = PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
+                for url in urls {
+                    _ = PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
+                }
             }
             exportError = nil
             statusTitle = "Saved to Photos"
-            statusDetail = "Open Instagram / TikTok and pick it from your library"
+            statusDetail = urls.count > 1
+                ? "\(urls.count) parts saved. Post them one by one from your library"
+                : "Open the app and pick it from your library"
             appendLog("Saved to Photos")
         } catch {
             exportError = error.localizedDescription
             appendLog("Save to Photos failed")
         }
     }
+}
+
+// MARK: - Share sheet (fallback Save to Photos)
+
+private struct ShareItem: Identifiable {
+    let id = UUID()
+    let urls: [URL]
+}
+
+private struct ActivityView: UIViewControllerRepresentable {
+    let urls: [URL]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: urls, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
 
 // MARK: - Platform logos
