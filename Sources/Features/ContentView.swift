@@ -585,7 +585,7 @@ private final class NaiseTranscoder: @unchecked Sendable {
 struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
 
-    @State private var isLightMode = false
+    private var isLightMode: Bool { colorScheme == .light }
 
     @State private var selectedVideo: PhotosPickerItem?
     @State private var videoURL: URL?
@@ -768,41 +768,16 @@ struct ContentView: View {
     }
 
     private var header: some View {
-    HStack {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("Naise+")
-                .font(.system(size: 27, weight: .bold, design: .rounded))
-            Text("AI Video Enhancer")
-                .font(.system(size: 12))
-                .foregroundStyle(mutedText)
-        }
-
-        Spacer()
-
-        HStack(spacing: 4) {
-            modeButton(icon: "moon.fill", lightTarget: false)
-            modeButton(icon: "sun.max.fill", lightTarget: true)
-        }
-        .padding(4)
-        .background(.ultraThinMaterial, in: Capsule())
-        .overlay(Capsule().stroke(glassBorder, lineWidth: 1))
-    }
-}
-
-    private func modeButton(icon: String, lightTarget: Bool) -> some View {
-        let isSelected = isLightMode == lightTarget
-        return Button {
-            withAnimation(.snappy(duration: 0.22)) {
-                isLightMode = lightTarget
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Naise+")
+                    .font(.system(size: 27, weight: .bold, design: .rounded))
+                Text("AI Video Enhancer")
+                    .font(.system(size: 12))
+                    .foregroundStyle(mutedText)
             }
-        } label: {
-            Image(systemName: icon)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(isSelected ? activeAccent : mutedText)
-                .frame(width: 32, height: 32)
-                .background(isSelected ? cyanAccent.opacity(0.2) : Color.clear, in: Circle())
+            Spacer()
         }
-        .buttonStyle(.plain)
     }
 
     private var importArea: some View {
