@@ -496,7 +496,9 @@ private final class NaiseTranscoder: @unchecked Sendable {
                 writer.finishWriting {
                     if writer.status == .completed {
                         onProgress(1)
-                        cont.resume(returning: plan)
+                        var done = plan
+                        done.usedAI = aiStage?.isActive ?? false
+                        cont.resume(returning: done)
                     } else {
                         cont.resume(throwing: NaiseError.failed(writer.error?.localizedDescription ?? "Finalize failed"))
                     }
@@ -528,7 +530,7 @@ struct ContentView: View {
     @State private var resolution = "1080p"
     @State private var fps = "30 FPS"
     @State private var upscale = true
-    @State private var useAI = true
+    @State private var useAI = false
     @State private var activeTranscoder: NaiseTranscoder?
 
     private let darkBgTop = Color(red: 0.08, green: 0.14, blue: 0.24)
@@ -1077,6 +1079,12 @@ struct ContentView: View {
     @MainActor
     private func saveToPhotos() async {
         guard let url = exportedVideoURL else { return }
+        // Tanpa key ni iOS akan crash app terus masa minta kebenaran Photos
+        guard Bundle.main.object(forInfoDictionaryKey: "NSPhotoLibraryAddUsageDescription") != nil else {
+            exportError = "Missing NSPhotoLibraryAddUsageDescription in Info.plist. Add it, rebuild, then try again."
+            appendLog("Save blocked: Info.plist key missing")
+            return
+        }
         let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
         guard status == .authorized || status == .limited else {
             exportError = "Allow Photos access (Add Photos only) in Settings to save the video."

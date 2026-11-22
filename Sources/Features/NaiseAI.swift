@@ -1,5 +1,6 @@
 import Foundation
 import CoreImage
+import CoreImage.CIFilterBuiltins
 import CoreMedia
 import CoreVideo
 import VideoToolbox
@@ -10,6 +11,23 @@ protocol NaiseFrameUpscaler: AnyObject {
     /// Pulang nil kalau gagal → pemanggil guna jalan Clean (Lanczos) untuk frame tu.
     func upscale(_ image: CIImage, pts: CMTime, context: CIContext) -> CIImage?
     func finish()
+    /// false kalau AI dimatikan sendiri (gagal berulang / output hitam)
+    var isActive: Bool { get }
+}
+
+/// Purata kecerahan 0...1 (untuk kesan frame hitam)
+func naiseAverageBrightness(_ image: CIImage, context: CIContext) -> Float {
+    let extent = image.extent
+    guard extent.width > 0, extent.height > 0 else { return 0 }
+    let filter = CIFilter.areaAverage()
+    filter.inputImage = image
+    filter.extent = extent
+    guard let out = filter.outputImage else { return 0 }
+    var px = [UInt8](repeating: 0, count: 4)
+    context.render(out, toBitmap: &px, rowBytes: 4,
+                   bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+                   format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
+    return (Float(px[0]) + Float(px[1]) + Float(px[2])) / (3 * 255)
 }
 
 /// Cuba sediakan AI super-resolution (VideoToolbox VTFrameProcessor, iOS 26+).
@@ -38,6 +56,9 @@ private final class NaiseVTSuperResolution: NaiseFrameUpscaler, @unchecked Senda
     private var previousSource: VTFrameProcessorFrame?
     private var previousOutput: VTFrameProcessorFrame?
     private var consecutiveFailures = 0
+    private var checkedFrames = 0
+    private var disabled = false
+    var isActive: Bool { !disabled && consecutiveFailures < 5 }
     private let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
 
     private init(srcPool: CVPixelBufferPool, dstPool: CVPixelBufferPool, width: Int, height: Int, factor: Int) {
@@ -111,7 +132,7 @@ private final class NaiseVTSuperResolution: NaiseFrameUpscaler, @unchecked Senda
 
     func upscale(_ image: CIImage, pts: CMTime, context: CIContext) -> CIImage? {
         // Kalau AI gagal berkali-kali, berhenti cuba (elak perlahan)
-        if consecutiveFailures >= 5 { return nil }
+        if disabled || consecutiveFailures >= 5 { return nil }
 
         var srcBuf: CVPixelBuffer?
         var dstBuf: CVPixelBuffer?
@@ -151,10 +172,25 @@ private final class NaiseVTSuperResolution: NaiseFrameUpscaler, @unchecked Senda
             return nil
         }
 
+        let result = CIImage(cvPixelBuffer: dstBuf)
+
+        // Semak 3 frame pertama: kalau input ada gambar tapi output hampir hitam, matikan AI
+        if checkedFrames < 3 {
+            checkedFrames += 1
+            let before = naiseAverageBrightness(image, context: context)
+            let after = naiseAverageBrightness(result, context: context)
+            if before > 0.08 && after < 0.02 {
+                disabled = true
+                previousSource = nil
+                previousOutput = nil
+                return nil
+            }
+        }
+
         consecutiveFailures = 0
         previousSource = srcFrame
         previousOutput = dstFrame
-        return CIImage(cvPixelBuffer: dstBuf)
+        return result
     }
 
     func finish() {
