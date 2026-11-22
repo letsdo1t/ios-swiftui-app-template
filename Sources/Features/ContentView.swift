@@ -1,7 +1,9 @@
 import SwiftUI
 import PhotosUI
 import Photos
-import AVFoundation
+import AVFoundationwithAnimation(.snappy(duration: 0.22)) {
+    // Theme follows the system appearance
+}
 import CoreImage
 import CoreImage.CIFilterBuiltins
 import UIKit
@@ -585,9 +587,8 @@ private final class NaiseTranscoder: @unchecked Sendable {
 struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
 
-private var isLightMode: Bool {
-    colorScheme == .light
-}
+    @State private var isLightMode = false
+
     @State private var selectedVideo: PhotosPickerItem?
     @State private var videoURL: URL?
     @State private var exportedURLs: [URL] = []
@@ -793,7 +794,9 @@ private var isLightMode: Bool {
     private func modeButton(icon: String, lightTarget: Bool) -> some View {
         let isSelected = isLightMode == lightTarget
         return Button {
-            withAnimation(.snappy(duration: 0.22)) { isLightMode = lightTarget }
+            withAnimation(.snappy(duration: 0.22)) {
+    // Theme follows the system appearance
+}
         } label: {
             Image(systemName: icon)
                 .font(.system(size: 13, weight: .semibold))
