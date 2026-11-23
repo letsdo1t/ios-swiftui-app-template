@@ -176,7 +176,7 @@ struct ContentView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                navigationBar
+                if page != 0 { navigationBar }
             }
             .frame(width: w / scale, height: h / scale)
             .scaleEffect(scale, anchor: .topLeading)
@@ -304,27 +304,40 @@ struct ContentView: View {
         return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 
-    // Fit the imported video's display orientation inside the existing glass card.
-    // A portrait clip is shown tall, landscape wide; neither is cropped or stretched.
+    // Video playback is available only after a completed server download.
+    // The source clip is never shown as an enhanced preview.
     private func playerFrame(minHeight: CGFloat, maxHeight: CGFloat, result: Bool = false) -> some View {
-        GeometryReader { geometry in
-            let ratio = clip.aspectRatio
-            let fittedWidth = min(geometry.size.width, geometry.size.height * ratio)
-            let fittedHeight = min(geometry.size.height, geometry.size.width / ratio)
+        let height = outputURL != nil && clip.aspectRatio < 1 ? maxHeight : minHeight
+        return GeometryReader { geometry in
             ZStack {
-                Color.black
-                if let url = result ? outputURL : inputURL {
+                Color.black.opacity(0.24)
+                if result, let url = outputURL {
                     VideoPlayer(player: playerFor(url))
-                        .frame(width: fittedWidth, height: fittedHeight)
-                } else {
-                    Image("NaiseSample").resizable().scaledToFill()
                         .frame(width: geometry.size.width, height: geometry.size.height)
-                        .clipped()
+                } else {
+                    VStack(spacing: 9) {
+                        Image(systemName: processing ? "hourglass" : "play.rectangle.on.rectangle")
+                            .font(.system(size: 25, weight: .light))
+                            .foregroundStyle(accent)
+                        Text("Preview available after processing")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(secondary)
+                            .multilineTextAlignment(.center)
+                        if processing {
+                            ProgressView(value: Double(progress), total: 100)
+                                .tint(accent)
+                                .frame(maxWidth: 170)
+                            Text("\(stage) · \(progress)%")
+                                .font(.system(size: 10))
+                                .foregroundStyle(secondary)
+                        }
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
-            .frame(width: geometry.size.width, height: geometry.size.height)
         }
-        .frame(height: inputURL == nil ? minHeight : (clip.aspectRatio < 1 ? maxHeight : minHeight))
+        .frame(height: height)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
@@ -386,29 +399,8 @@ struct ContentView: View {
 
             flexGap(8)
             surface(radius: 16) {
-                ZStack(alignment: .topLeading) {
-                    playerFrame(minHeight: 172, maxHeight: 250)
-                    Label("My Video.mp4", systemImage: "film")
-                        .font(.system(size: 9, weight: .medium)).foregroundStyle(.white)
-                        .padding(.horizontal, 8).padding(.vertical, 5)
-                        .background(.black.opacity(0.45), in: Capsule()).padding(8)
-                    if inputURL == nil {
-                        Image(systemName: "play.fill").font(.system(size: 17)).foregroundStyle(.white)
-                            .frame(width: 44, height: 44).background(.black.opacity(0.45), in: Circle())
-                            .overlay(Circle().stroke(.white.opacity(0.4)))
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        VStack(spacing: 5) {
-                            Spacer()
-                            HStack { Text("00:00 / \(mmss(inputURL == nil ? 84 : clip.duration))"); Spacer() }
-                            HStack(spacing: 8) {
-                                Capsule().fill(.white.opacity(0.35)).frame(height: 3)
-                                    .overlay(alignment: .leading) { Capsule().fill(.white).frame(width: 30, height: 3) }
-                                Image(systemName: "arrow.up.left.and.arrow.down.right").font(.system(size: 9))
-                            }
-                        }
-                        .font(.system(size: 9, weight: .medium)).foregroundStyle(.white).padding(10)
-                    }
-                }.frame(height: inputURL == nil ? 172 : (clip.aspectRatio < 1 ? 250 : 172)).padding(6)
+                playerFrame(minHeight: 172, maxHeight: 250)
+                    .padding(6)
             }
 
             HStack(spacing: 6) {
@@ -432,7 +424,9 @@ struct ContentView: View {
             PhotosPicker(selection: $selected, matching: .videos) {
                 gradientLabel("Import Video", symbol: "plus", gradient: blueGradient)
             }.buttonStyle(.plain).disabled(processing)
-            flexGap(18)
+            navigationBar
+                .padding(.horizontal, -14)
+                .padding(.top, 12)
         }.padding(.horizontal, 14).padding(.bottom, 6)
     }
 
@@ -473,44 +467,7 @@ struct ContentView: View {
     }
 
     private var previewComparison: some View {
-        ZStack(alignment: .bottom) {
-            if inputURL == nil {
-                GeometryReader { g in
-                    let pos = g.size.width * split
-                    ZStack(alignment: .leading) {
-                        Image("NaiseSample").resizable().scaledToFill()
-                            .frame(width: g.size.width, height: g.size.height).clipped()
-                        Image("NaiseSample").resizable().scaledToFill().blur(radius: 1.6).saturation(0.55).contrast(0.82).brightness(-0.05)
-                            .frame(width: g.size.width, height: g.size.height).clipped()
-                            .mask(alignment: .leading) { Rectangle().frame(width: pos) }
-                        Rectangle().fill(.white).frame(width: 2).offset(x: pos - 1)
-                        HStack(spacing: 1) {
-                            Image(systemName: "chevron.left"); Image(systemName: "chevron.right")
-                        }
-                        .font(.system(size: 8, weight: .bold)).foregroundStyle(.white)
-                        .frame(width: 28, height: 28)
-                        .background(.black.opacity(0.5), in: Circle()).overlay(Circle().stroke(.white, lineWidth: 1.2))
-                        .offset(x: pos - 14)
-                    }
-                    .contentShape(Rectangle())
-                    .gesture(DragGesture(minimumDistance: 0).onChanged { value in
-                        split = min(max(value.location.x / max(1, g.size.width), 0.05), 0.95)
-                    })
-                }
-            } else {
-                playerFrame(minHeight: 150, maxHeight: 230)
-            }
-            HStack {
-                Text("Original").padding(.horizontal, 8).padding(.vertical, 4)
-                    .background(.black.opacity(0.45), in: Capsule())
-                Spacer()
-                Text(outputURL == nil && inputURL != nil ? "Preview" : "Enhanced").padding(.horizontal, 8).padding(.vertical, 4)
-                    .background(blueGradient, in: Capsule())
-            }
-            .font(.system(size: 9, weight: .semibold)).foregroundStyle(.white).padding(7)
-        }
-        .frame(height: inputURL == nil ? 150 : (clip.aspectRatio < 1 ? 230 : 150))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        playerFrame(minHeight: 150, maxHeight: 230)
     }
 
     private var enhanceScreen: some View {
@@ -672,11 +629,19 @@ struct ContentView: View {
                 resultTile("square.stack.3d.up", done ? "\(fps) FPS" : "—", "Frame Rate")
                 resultTile("externaldrive", outputURL.map { fileSizeText($0) } ?? "—", "File Size")
             }
+            if outputURL != nil {
+                surface(radius: 16) {
+                    playerFrame(minHeight: 150, maxHeight: 230, result: true)
+                        .padding(6)
+                }
+            }
             surface(radius: 14) {
                 HStack(spacing: 10) {
-                    Image("NaiseSample").resizable().scaledToFill().frame(width: 52, height: 40).clipped()
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        .overlay(Image(systemName: "play.fill").font(.system(size: 9)).foregroundStyle(.white))
+                    Image(systemName: outputURL == nil ? "film" : "play.rectangle.fill")
+                        .font(.system(size: 19))
+                        .foregroundStyle(accent)
+                        .frame(width: 52, height: 40)
+                        .background(inactiveFill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     VStack(alignment: .leading, spacing: 3) {
                         Text("My Video (Enhanced).mp4").font(.system(size: 11, weight: .semibold)).lineLimit(1)
                         Text(done ? "\(outLabel) · \(fps) FPS · \(outputURL.map { fileSizeText($0) } ?? "")" : "Process a clip to enable sharing")
