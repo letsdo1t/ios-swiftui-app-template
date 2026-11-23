@@ -151,43 +151,28 @@ struct ContentView: View {
     private var glassFill: Color { dark ? Color(red: 0.066, green: 0.073, blue: 0.119) : Color.white.opacity(0.82) }
     private var inactiveFill: Color { dark ? Color(red: 0.17, green: 0.19, blue: 0.27) : Color(red: 0.91, green: 0.93, blue: 0.97) }
 
+    // One visual canvas; sizes are calculated from the iPhone's actual safe area.
+    // No scrolling on iPhone 15 Pro for the three primary screens.
     var body: some View {
-        GeometryReader { proxy in
-            let compact = proxy.size.height < 740
+        GeometryReader { geometry in
+            let safeHeight = geometry.size.height
+            let safeWidth = geometry.size.width
+            let scale = min(1.0, safeWidth / 365.0, safeHeight / 695.0)
             VStack(spacing: 0) {
-                // ScrollView = fallback supaya tiada yang terpotong pada skrin kecil (SE, mini).
-                // Pada skrin besar kandungan penuhkan ruang, tiada scroll.
-                ScrollView(showsIndicators: false) {
-                    Group {
-                        switch page {
-                        case 1: enhance(compact: compact)
-                        case 2: result(compact: compact)
-                        default: home(compact: compact)
-                        }
+                Group {
+                    switch page {
+                    case 1: enhanceScreen
+                    case 2: resultScreen
+                    default: homeScreen
                     }
-                    .frame(maxWidth: .infinity, minHeight: max(0, proxy.size.height - 64), alignment: .top)
                 }
-                .scrollBounceBehavior(.basedOnSize)
-                bottomBar()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                navigationBar
             }
-            .padding(.horizontal, compact ? 14 : 15)
-            .padding(.top, compact ? 2 : 4)
-            .padding(.bottom, 3)
-            .background {
-                bg.ignoresSafeArea()
-                if dark {
-                    RadialGradient(colors: [purple.opacity(0.115), .clear], center: .topTrailing, startRadius: 0, endRadius: 310).ignoresSafeArea()
-                    // Glow ungu-biru macam dalam gambar dark mode
-                    Circle().fill(purple.opacity(0.30)).frame(width: 300, height: 300).blur(radius: 90)
-                        .offset(x: 170, y: -300).allowsHitTesting(false)
-                    Circle().fill(blue.opacity(0.30)).frame(width: 320, height: 320).blur(radius: 90)
-                        .offset(x: -170, y: 340).allowsHitTesting(false)
-                } else {
-                    Circle().fill(blue.opacity(0.10)).frame(width: 320, height: 320).blur(radius: 80)
-                        .offset(x: -170, y: 340).allowsHitTesting(false)
-                    LinearGradient(colors: [Color.white.opacity(0.92), Color(red: 0.91, green: 0.94, blue: 0.99), Color.white.opacity(0.40)], startPoint: .topLeading, endPoint: .bottomTrailing).ignoresSafeArea()
-                }
-            }
+            .frame(width: safeWidth / scale, height: safeHeight / scale)
+            .scaleEffect(scale, anchor: .topLeading)
+            .frame(width: safeWidth, height: safeHeight, alignment: .topLeading)
+            .background { appBackground.ignoresSafeArea() }
         }
         .foregroundStyle(ink)
         .tint(accent)
@@ -198,432 +183,388 @@ struct ContentView: View {
             Button("OK", role: .cancel) { failure = nil }
         } message: { Text(failure ?? "") }
         .alert("Video Details", isPresented: $showInfo) {
-            Button("OK", role: .cancel) {}
+            Button("OK", role: .cancel) { }
         } message: { Text(clip.label) }
         .task { await resumeJobIfNeeded() }
     }
 
-    private func glass<Content: View>(radius: CGFloat = 16, @ViewBuilder _ content: () -> Content) -> some View {
+    private var appBackground: some View {
+        ZStack {
+            bg
+            if dark {
+                RadialGradient(colors: [purple.opacity(0.23), .clear], center: .topTrailing,
+                               startRadius: 0, endRadius: 370)
+                RadialGradient(colors: [blue.opacity(0.18), .clear], center: .bottomLeading,
+                               startRadius: 0, endRadius: 320)
+            } else {
+                LinearGradient(colors: [.white, Color(red: 0.93, green: 0.95, blue: 0.99)],
+                               startPoint: .topLeading, endPoint: .bottomTrailing)
+            }
+        }
+    }
+
+    private func surface<Content: View>(radius: CGFloat = 15, @ViewBuilder _ content: () -> Content) -> some View {
         content()
             .background {
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
                     .fill(.ultraThinMaterial)
                     .overlay {
                         RoundedRectangle(cornerRadius: radius, style: .continuous)
-                            .fill(LinearGradient(
-                                colors: dark
-                                    ? [Color.white.opacity(0.075), glassFill.opacity(0.84), Color.black.opacity(0.13)]
-                                    : [Color.white.opacity(0.90), glassFill.opacity(0.74), Color(red: 0.89, green: 0.92, blue: 0.98).opacity(0.64)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ))
+                            .fill(dark
+                                ? Color(red: 0.08, green: 0.09, blue: 0.14).opacity(0.82)
+                                : Color.white.opacity(0.70))
                     }
                     .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
             }
             .overlay {
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .strokeBorder(LinearGradient(
-                        colors: dark
-                            ? [Color.white.opacity(0.25), Color.white.opacity(0.09), Color.white.opacity(0.15)]
-                            : [.white, .white.opacity(0.55), Color(red: 0.75, green: 0.81, blue: 0.92)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ), lineWidth: 0.85)
+                    .strokeBorder(dark ? .white.opacity(0.15) : .white.opacity(0.94), lineWidth: 0.8)
             }
-            .shadow(color: dark ? .black.opacity(0.35) : Color(red: 0.27, green: 0.39, blue: 0.59).opacity(0.14), radius: 11, y: 5)
+            .shadow(color: dark ? .black.opacity(0.18) : .gray.opacity(0.10), radius: 9, y: 3)
     }
 
-    private func circularButton(_ symbol: String, perform: @escaping () -> Void) -> some View {
-        Button(action: perform) {
-            Image(systemName: symbol)
-                .font(.system(size: 14, weight: .semibold))
-                .frame(width: 32, height: 32)
-                .background(.thinMaterial, in: Circle())
-                .overlay(Circle().stroke(borderColor, lineWidth: 0.8))
-        }.buttonStyle(.plain)
+    private var primaryGradient: LinearGradient {
+        LinearGradient(colors: dark ? [purple, blue] : [Color(red: 0.13, green: 0.70, blue: 0.98), blue],
+                       startPoint: .leading, endPoint: .trailing)
     }
 
-    private func pageHeader(_ title: String) -> some View {
-        HStack {
-            circularButton("chevron.left") { page = page == 2 ? 1 : 0 }
-            Spacer()
-            Text(title).font(.system(size: 17, weight: .semibold))
-            Spacer()
-            circularButton("ellipsis") { settings = true }
-        }
-        .frame(height: 37)
-    }
-
-    private var compactButtonHeight: CGFloat { 43 }
-
-    private func button(_ title: String, symbol: String, prominent: Bool, action: @escaping () -> Void) -> some View {
+    private func pillButton(_ title: String, symbol: String, prominent: Bool = false,
+                            action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Label(title, systemImage: symbol)
-                .font(.system(size: 14, weight: .semibold))
-                .frame(maxWidth: .infinity)
-                .frame(height: compactButtonHeight)
+                .font(.system(size: 13, weight: .semibold))
+                .frame(maxWidth: .infinity).frame(height: 42)
                 .foregroundStyle(prominent ? Color.white : ink)
                 .background {
-                    RoundedRectangle(cornerRadius: 15, style: .continuous)
-                        .fill(prominent ? AnyShapeStyle(actionGradient) : AnyShapeStyle(.thinMaterial))
+                    RoundedRectangle(cornerRadius: 14).fill(
+                        prominent ? AnyShapeStyle(primaryGradient) : AnyShapeStyle(.ultraThinMaterial))
                 }
-                .overlay {
-                    RoundedRectangle(cornerRadius: 15).strokeBorder(borderColor.opacity(0.8), lineWidth: 0.9)
-                }
-                .shadow(color: prominent ? accent.opacity(0.20) : .clear, radius: 7, y: 3)
+                .overlay { RoundedRectangle(cornerRadius: 14).strokeBorder(.white.opacity(dark ? 0.11 : 0.80)) }
         }.buttonStyle(.plain)
     }
 
-    private func bottomBar() -> some View {
+    private func navCircle(_ symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: 13, weight: .semibold))
+                .frame(width: 30, height: 30)
+                .background(.thinMaterial, in: Circle())
+                .overlay(Circle().stroke(.white.opacity(0.16), lineWidth: 0.7))
+        }.buttonStyle(.plain)
+    }
+
+    private func header(_ title: String) -> some View {
+        HStack {
+            navCircle("chevron.left") { page = page == 2 ? 1 : 0 }
+            Spacer()
+            Text(title).font(.system(size: 16, weight: .semibold))
+            Spacer()
+            navCircle("ellipsis") { settings = true }
+        }
+        .frame(height: 38)
+    }
+
+    private var navigationBar: some View {
         HStack(spacing: 0) {
-            tab("house.fill", "Home", 0)
-            tab("sparkles", "Enhance", 1)
-            tab("play.rectangle", "Result", 2)
+            navItem("house.fill", "Home", 0)
+            navItem("sparkles", "Enhance", 1)
+            navItem("play.rectangle", "Result", 2)
         }
-        .padding(.vertical, 6)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay { RoundedRectangle(cornerRadius: 18).strokeBorder(borderColor, lineWidth: 0.9) }
-        .padding(.top, 4)
+        .padding(.vertical, 5)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 17))
+        .overlay { RoundedRectangle(cornerRadius: 17).strokeBorder(.white.opacity(dark ? 0.12 : 0.85)) }
+        .padding(.horizontal, 13).padding(.bottom, 3)
     }
 
-    private func tab(_ symbol: String, _ name: String, _ index: Int) -> some View {
-        Button { page = index } label: {
+    private func navItem(_ icon: String, _ label: String, _ destination: Int) -> some View {
+        Button { page = destination } label: {
             VStack(spacing: 3) {
-                Image(systemName: symbol).font(.system(size: 17, weight: page == index ? .semibold : .regular))
-                Text(name).font(.system(size: 10, weight: page == index ? .semibold : .regular))
+                Image(systemName: icon).font(.system(size: 17))
+                Text(label).font(.system(size: 10, weight: page == destination ? .semibold : .regular))
             }
-            .frame(maxWidth: .infinity)
-            .foregroundStyle(page == index ? accent : secondary)
+            .foregroundStyle(page == destination ? accent : secondary)
+            .frame(maxWidth: .infinity).frame(height: 38)
         }.buttonStyle(.plain)
     }
 
-    // The illustrated empty state resembles the chosen concept without pretending a video is processed.
-    private func videoPanel(height: CGFloat, resultVideo: Bool = false) -> some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .fill(dark ? Color(red: 0.045, green: 0.060, blue: 0.110) : Color(red: 0.87, green: 0.92, blue: 0.98))
-            if let url = resultVideo ? outputURL : inputURL {
-                VideoPlayer(player: playerFor(url))
-                    .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-            } else {
-                GeometryReader { sampleSize in
-                    Image("NaiseSample")
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: sampleSize.size.width, height: sampleSize.size.height)
-                        .clipped()
-                        .overlay(alignment: .bottomLeading) {
-                            Text(resultVideo ? "Sample only · No result yet" : "Sample only · Import a video")
-                                .font(.system(size: 9, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 9).padding(.vertical, 5)
-                                .background(.black.opacity(0.58), in: Capsule())
-                                .padding(9)
-                        }
-                }
-                .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-            }
-        }
-        .frame(height: height)
-        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-    }
-
-    // Slider Original ↔ Enhanced. Seret untuk bandingkan. Hanya untuk SAMPLE bila belum ada video.
-    private func compareSample(height: CGFloat) -> some View {
+    private func placeholderPhoto(height: CGFloat, result: Bool = false) -> some View {
         GeometryReader { g in
-            let x = g.size.width * split
-            ZStack(alignment: .leading) {
-                Image("NaiseSample").resizable().scaledToFill()
-                    .frame(width: g.size.width, height: g.size.height).clipped()
-                    .saturation(1.08).contrast(1.06)
-                Image("NaiseSample").resizable().scaledToFill()
-                    .saturation(0.76)
+            ZStack {
+                Image("NaiseSample")
+                    .resizable().scaledToFill()
                     .frame(width: g.size.width, height: g.size.height)
-                    .mask(alignment: .leading) { Rectangle().frame(width: x) }
-                Rectangle().fill(.white).frame(width: 2, height: g.size.height)
-                    .offset(x: x - 1)
-                Image(systemName: "arrow.left.and.right")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.white)
-                    .frame(width: 30, height: 30)
-                    .background(.black.opacity(0.45), in: Circle())
-                    .overlay(Circle().stroke(.white, lineWidth: 1.5))
-                    .offset(x: x - 15)
+                    .clipped()
+                if !result {
+                    Image(systemName: "play.fill").font(.system(size: 16))
+                        .foregroundStyle(.white)
+                        .frame(width: 43, height: 43)
+                        .background(.black.opacity(0.55), in: Circle())
+                        .overlay(Circle().stroke(.white.opacity(0.35)))
+                }
                 VStack {
                     Spacer()
                     HStack {
-                        Text("Original")
-                            .padding(.horizontal, 8).padding(.vertical, 4)
-                            .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 6))
+                        Text(result ? "Sample only · No result yet" : "Sample preview · Import a video")
+                            .font(.system(size: 9, weight: .medium))
+                            .padding(.horizontal, 9).padding(.vertical, 5)
+                            .background(.black.opacity(0.60), in: Capsule())
                         Spacer()
-                        Text("Enhanced")
-                            .padding(.horizontal, 8).padding(.vertical, 4)
-                            .background(accent, in: RoundedRectangle(cornerRadius: 6))
                     }
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.white)
-                    .padding(8)
+                    .foregroundStyle(.white).padding(8)
                 }
             }
-            .frame(width: g.size.width, height: g.size.height, alignment: .leading)
-            .contentShape(Rectangle())
-            .gesture(DragGesture(minimumDistance: 0).onChanged { value in
-                split = min(max(value.location.x / max(g.size.width, 1), 0.06), 0.94)
-            })
         }
         .frame(height: height)
-        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
-    private func sectionHeading(_ title: String) -> some View {
-        HStack(spacing: 7) {
-            Image(systemName: "sparkles").foregroundStyle(accent)
-            Text(title).font(.system(size: 13, weight: .semibold))
-            Spacer(minLength: 0)
+    private func videoPreview(height: CGFloat, result: Bool = false) -> some View {
+        Group {
+            if let url = result ? outputURL : inputURL {
+                VideoPlayer(player: playerFor(url))
+                    .frame(height: height)
+                    .background(.black)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+            } else {
+                placeholderPhoto(height: height, result: result)
+            }
         }
-        .padding(.horizontal, 2)
     }
 
-    private func smallTool(_ icon: String, _ label: String, action: @escaping () -> Void) -> some View {
+    private func detailTriple(_ values: [(String, String, String)]) -> some View {
+        HStack(spacing: 0) {
+            ForEach(0..<3, id: \.self) { i in
+                VStack(spacing: 3) {
+                    Image(systemName: values[i].0).font(.system(size: 13))
+                    Text(values[i].1).font(.system(size: 11, weight: .semibold))
+                        .lineLimit(1).minimumScaleFactor(0.65)
+                    Text(values[i].2).font(.system(size: 9)).foregroundStyle(secondary)
+                }
+                .frame(maxWidth: .infinity)
+                if i < 2 { Rectangle().fill(.gray.opacity(0.20)).frame(width: 1, height: 32) }
+            }
+        }.padding(.vertical, 10)
+    }
+
+    private func tool(_ symbol: String, _ title: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            VStack(spacing: 5) {
-                Image(systemName: icon).font(.system(size: 17))
-                Text(label).font(.system(size: 11, weight: .medium))
+            VStack(spacing: 4) {
+                Image(systemName: symbol).font(.system(size: 17))
+                Text(title).font(.system(size: 10, weight: .medium))
             }
-            .frame(maxWidth: .infinity)
-            .frame(height: 47)
-            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 13))
-            .overlay { RoundedRectangle(cornerRadius: 13).strokeBorder(borderColor) }
-        }.buttonStyle(.plain)
-    }
-
-    private func toolContent(_ icon: String, _ label: String) -> some View {
-        VStack(spacing: 5) {
-            Image(systemName: icon).font(.system(size: 17))
-            Text(label).font(.system(size: 11, weight: .medium))
+            .frame(maxWidth: .infinity).frame(height: 48)
         }
-        .frame(maxWidth: .infinity).frame(height: 47)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 13))
-        .overlay { RoundedRectangle(cornerRadius: 13).strokeBorder(borderColor) }
+        .buttonStyle(.plain)
+        .background { RoundedRectangle(cornerRadius: 12).fill(.thinMaterial) }
+        .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(.white.opacity(dark ? 0.12 : 0.85)) }
     }
 
-    private func compactStat(_ icon: String, _ value: String, _ caption: String) -> some View {
-        VStack(spacing: 3) {
-            Image(systemName: icon).font(.system(size: 13))
-            Text(value).font(.system(size: 11, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.6)
-            Text(caption).font(.system(size: 9)).foregroundStyle(secondary).lineLimit(1)
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    private func filledLabel(_ title: String, icon: String, prominent: Bool) -> some View {
-        Label(title, systemImage: icon)
-            .font(.system(size: 14, weight: .semibold))
-            .frame(maxWidth: .infinity).frame(height: 40)
-            .foregroundStyle(prominent ? .white : ink)
-            .background {
-                RoundedRectangle(cornerRadius: 15)
-                    .fill(prominent ? AnyShapeStyle(actionGradient) : AnyShapeStyle(.thinMaterial))
-            }
-            .overlay { RoundedRectangle(cornerRadius: 15).strokeBorder(borderColor.opacity(0.8)) }
-    }
-
-    private func home(compact: Bool) -> some View {
-        VStack(spacing: compact ? 7 : 11) {
+    private var homeScreen: some View {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 (Text("Naise").foregroundColor(ink) + Text("+").foregroundColor(accent))
-                    .font(.system(size: compact ? 20 : 22, weight: .bold))
+                    .font(.system(size: 22, weight: .bold))
                 Spacer()
-                circularButton("gearshape") { settings = true }
-            }
-            .frame(height: 32)
+                // Settings remains available, without adding logo or notification icon.
+                navCircle("gearshape") { settings = true }
+            }.frame(height: 38)
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Enhance Your\nVideos with AI")
-                    .font(.system(size: compact ? 22 : 25, weight: .bold))
-                    .lineLimit(2).minimumScaleFactor(0.87)
-                Text("Smooth motion, natural color, original audio.")
-                    .font(.system(size: 11)).foregroundStyle(secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.bottom, 2)
+            Text("Enhance Your\nVideos with AI")
+                .font(.system(size: 22, weight: .bold))
+                .lineSpacing(-2).fixedSize(horizontal: false, vertical: true)
+            Text("Smooth motion, natural color, original audio.")
+                .font(.system(size: 10)).foregroundStyle(secondary)
 
-            glass(radius: 18) {
-                VStack(spacing: 6) {
+            surface(radius: 17) {
+                VStack(spacing: 5) {
                     ZStack(alignment: .topLeading) {
-                        videoPanel(height: compact ? 170 : 218)
-                        if let url = inputURL {
-                            HStack(spacing: 4) {
-                                Image(systemName: "film")
-                                Text(url.lastPathComponent).lineLimit(1)
-                            }
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 8).padding(.vertical, 5)
-                            .background(.black.opacity(0.55), in: Capsule())
-                            .padding(8)
+                        videoPreview(height: 206)
+                        if let inputURL {
+                            Text(inputURL.lastPathComponent)
+                                .font(.system(size: 9))
+                                .lineLimit(1)
+                                .padding(.horizontal, 8).padding(.vertical, 4)
+                                .foregroundStyle(.white)
+                                .background(.black.opacity(0.55), in: Capsule())
+                                .padding(7)
                         }
                     }
                     HStack {
                         Text(inputURL == nil ? "Choose a video to begin" : "Original video")
-                        Spacer(minLength: 2)
+                        Spacer()
                         if inputURL != nil { Text("\(Int(clip.duration.rounded()))s") }
-                    }
-                    .font(.system(size: 10)).foregroundStyle(secondary)
-                }
-                .padding(8)
+                    }.font(.system(size: 9)).foregroundStyle(secondary)
+                }.padding(8)
             }
-
             HStack(spacing: 6) {
                 PhotosPicker(selection: $selected, matching: .videos) {
-                    toolContent("arrow.triangle.2.circlepath", "Replace")
-                }.buttonStyle(.plain).disabled(processing)
-                smallTool("scissors", "Trim") { failure = "Trim belum tersedia dalam versi ini. Ciri ini masih dalam senarai pembangunan." }
-                smallTool("info.circle", "Details") { showInfo = true }
-            }.disabled(inputURL == nil)
-
-            glass(radius: 13) {
-                HStack(spacing: 0) {
-                    compactStat("clock", inputURL == nil ? "—" : "\(Int(clip.duration.rounded()))s", "Duration")
-                    Rectangle().fill(borderColor).frame(width: 1, height: 25)
-                    compactStat("viewfinder", inputURL == nil ? "—" : "\(clip.width)×\(clip.height)", "Resolution")
-                    Rectangle().fill(borderColor).frame(width: 1, height: 25)
-                    compactStat("speedometer", inputURL == nil ? "—" : "\(Int(clip.fps.rounded())) FPS", "Frame Rate")
-                }.padding(.vertical, 8)
+                    VStack(spacing: 4) {
+                        Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 17))
+                        Text("Replace").font(.system(size: 10))
+                    }.frame(maxWidth: .infinity).frame(height: 48)
+                }.buttonStyle(.plain).background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                    .disabled(inputURL == nil || processing)
+                tool("scissors", "Trim") { failure = "Trim belum tersedia dalam versi ini." }
+                    .disabled(inputURL == nil)
+                tool("info.circle", "Details") { showInfo = true }
+                    .disabled(inputURL == nil)
             }
-
+            surface(radius: 13) {
+                detailTriple([
+                    ("clock", inputURL == nil ? "—" : "\(Int(clip.duration.rounded()))s", "Duration"),
+                    ("viewfinder", inputURL == nil ? "—" : "\(clip.width)×\(clip.height)", "Resolution"),
+                    ("speedometer", inputURL == nil ? "—" : "\(Int(clip.fps.rounded())) FPS", "Frame Rate")
+                ])
+            }
             PhotosPicker(selection: $selected, matching: .videos) {
-                filledLabel(inputURL == nil ? "Import Video" : "Import Another Video", icon: "plus", prominent: true)
+                Label(inputURL == nil ? "Import Video" : "Import Another Video", systemImage: "plus")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity).frame(height: 43)
+                    .background(primaryGradient, in: RoundedRectangle(cornerRadius: 13))
             }.buttonStyle(.plain).disabled(processing)
-
             if inputURL != nil {
-                button("Open Enhance", symbol: "sparkles", prominent: false) { page = 1 }
+                pillButton("Open Enhance", symbol: "sparkles") { page = 1 }
             }
             Spacer(minLength: 0)
         }
+        .padding(.horizontal, 14)
     }
 
-    private func platformRow() -> some View {
-        Menu {
-            ForEach(["WhatsApp", "Instagram", "TikTok", "YouTube"], id: \.self) { option in
-                Button(option) { platform = option }
-            }
-        } label: {
-            settingsRow("square.stack", title: "Platform", subtitle: "Selected target platform", trailing: platform + "  ›")
-        }.buttonStyle(.plain)
-    }
-
-    private func settingsRow(_ symbol: String, title: String, subtitle: String, trailing: String) -> some View {
+    private func settingsLine(_ symbol: String, title: String, subtitle: String, @ViewBuilder trailing: () -> some View) -> some View {
         HStack(spacing: 9) {
-            Image(systemName: symbol).font(.system(size: 15)).frame(width: 21)
+            Image(systemName: symbol).font(.system(size: 14)).frame(width: 21)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.system(size: 12, weight: .semibold))
                 Text(subtitle).font(.system(size: 9)).foregroundStyle(secondary)
             }
-            Spacer(minLength: 2)
-            Text(trailing).font(.system(size: 10, weight: .medium)).foregroundStyle(secondary)
-        }.padding(.horizontal, 10).frame(height: 43)
+            Spacer(minLength: 3)
+            trailing()
+        }
+        .padding(.horizontal, 10).frame(height: 46)
     }
 
-    private func choice(_ label: String, active: Bool, perform: @escaping () -> Void) -> some View {
-        Button(action: perform) {
-            Text(label).font(.system(size: 11, weight: .semibold))
-                .frame(minWidth: 42)
-                .padding(.horizontal, 8)
-                .frame(height: 27)
-                .foregroundStyle(active ? Color.white : ink)
-                .background {
-                    Capsule().fill(active ? AnyShapeStyle(actionGradient) : AnyShapeStyle(inactiveFill))
-                }
+    private func resolutionChip(_ title: String) -> some View {
+        Button { resolution = title } label: {
+            Text(title).font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(resolution == title ? Color.white : ink)
+                .padding(.horizontal, 12).frame(height: 27)
+                .background(resolution == title ? AnyShapeStyle(primaryGradient) : AnyShapeStyle(.thinMaterial), in: Capsule())
         }.buttonStyle(.plain)
     }
 
-    private func enhance(compact: Bool) -> some View {
-        VStack(spacing: compact ? 7 : 11) {
-            pageHeader("Enhance")
-            glass {
-                VStack(spacing: 6) {
-                    if inputURL == nil {
-                        // Tiada video: tunjuk slider Original/Enhanced (contoh sahaja, bukan hasil sebenar)
-                        compareSample(height: compact ? 145 : 180)
-                    } else {
-                        ZStack(alignment: .top) {
-                            videoPanel(height: compact ? 145 : 180)
-                            HStack(spacing: 8) {
-                                Text("Original")
-                                Spacer()
-                                Text(outputURL == nil ? "Preview" : "Enhanced")
-                            }
-                            .font(.system(size: 10, weight: .medium))
-                            .padding(.horizontal, 9).padding(.vertical, 6)
-                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
-                            .padding(6)
-                        }
+    private var previewComparison: some View {
+        ZStack(alignment: .bottom) {
+            if inputURL == nil {
+                GeometryReader { g in
+                    let pos = g.size.width * split
+                    ZStack(alignment: .leading) {
+                        Image("NaiseSample").resizable().scaledToFill()
+                            .frame(width: g.size.width, height: g.size.height).clipped()
+                        Image("NaiseSample").resizable().scaledToFill()
+                            .saturation(0.78)
+                            .frame(width: g.size.width, height: g.size.height)
+                            .mask(alignment: .leading) { Rectangle().frame(width: pos) }
+                        Rectangle().fill(.white).frame(width: 2).offset(x: pos - 1)
+                        Image(systemName: "arrow.left.and.right")
+                            .font(.system(size: 10, weight: .bold)).foregroundStyle(.white)
+                            .frame(width: 27, height: 27)
+                            .background(.black.opacity(0.55), in: Circle())
+                            .overlay(Circle().stroke(.white))
+                            .offset(x: pos - 13.5)
                     }
+                    .contentShape(Rectangle())
+                    .gesture(DragGesture(minimumDistance: 0).onChanged { gesture in
+                        split = min(max(gesture.location.x / max(1, g.size.width), 0.05), 0.95)
+                    })
+                }
+                .frame(height: 188)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+            } else {
+                videoPreview(height: 188)
+            }
+            HStack {
+                Text("Original")
+                Spacer()
+                Text(inputURL == nil ? "Sample" : (outputURL == nil ? "Preview" : "Enhanced"))
+            }
+            .font(.system(size: 9, weight: .medium))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 9).padding(.vertical, 5)
+            .background(.black.opacity(0.30))
+        }
+        .frame(height: 188)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var enhanceScreen: some View {
+        VStack(spacing: 8) {
+            header("Enhance")
+            surface(radius: 16) {
+                VStack(spacing: 5) {
+                    previewComparison
                     HStack {
-                        Text(inputURL?.lastPathComponent ?? "No video selected · sample preview")
-                        Spacer(minLength: 4)
+                        Text(inputURL?.lastPathComponent ?? "Sample preview · Import a video")
+                        Spacer()
                         if inputURL != nil { Text(clip.label) }
-                    }
-                    .font(.system(size: 9)).foregroundStyle(secondary).lineLimit(1)
-                }.padding(8)
+                    }.lineLimit(1).font(.system(size: 9)).foregroundStyle(secondary)
+                }.padding(7)
             }
-            sectionHeading("Enhancement Settings")
-            glass(radius: 13) { platformRow() }
-            glass(radius: 13) {
-                HStack(spacing: 8) {
-                    Image(systemName: "viewfinder").font(.system(size: 15)).frame(width: 21)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Resolution").font(.system(size: 12, weight: .semibold))
-                        Text("Output video quality").font(.system(size: 9)).foregroundStyle(secondary)
+            HStack(spacing: 6) {
+                Image(systemName: "sparkles").foregroundStyle(accent)
+                Text("Enhancement Settings").font(.system(size: 13, weight: .semibold))
+                Spacer()
+            }.padding(.top, 1)
+            surface(radius: 13) {
+                Menu {
+                    ForEach(["WhatsApp", "Instagram", "TikTok", "YouTube"], id: \.self) { name in
+                        Button(name) { platform = name }
                     }
-                    Spacer(minLength: 2)
-                    choice("1080p", active: resolution == "1080p") { resolution = "1080p" }
-                    choice("4K", active: resolution == "4K") { resolution = "4K" }
-                }.padding(.horizontal, 10).frame(height: 43)
+                } label: {
+                    settingsLine("square.stack", title: "Platform", subtitle: "Optimize for your target platform") {
+                        Text(platform + " ›").font(.system(size: 10)).foregroundStyle(secondary)
+                    }
+                }.buttonStyle(.plain)
             }
-            glass(radius: 13) {
-                HStack(spacing: 8) {
-                    Image(systemName: "video").font(.system(size: 15)).frame(width: 21)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Frame Rate").font(.system(size: 12, weight: .semibold))
-                        Text("Smooth motion output").font(.system(size: 9)).foregroundStyle(secondary)
-                    }
-                    Spacer(minLength: 2)
+            surface(radius: 13) {
+                settingsLine("viewfinder", title: "Resolution", subtitle: "Output video quality") {
+                    resolutionChip("1080p")
+                    resolutionChip("4K")
+                }
+            }
+            surface(radius: 13) {
+                settingsLine("video", title: "Frame Rate", subtitle: "Smooth motion output") {
                     Text("60 FPS").font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Color.white)
-                        .padding(.horizontal, 13).frame(height: 27)
-                        .background(actionGradient, in: Capsule())
-                }.padding(.horizontal, 10).frame(height: 43)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12).frame(height: 27)
+                        .background(primaryGradient, in: Capsule())
+                }
             }
-            glass(radius: 14) {
-                VStack(alignment: .leading, spacing: compact ? 4 : 5) {
-                    HStack(spacing: 7) {
+            surface(radius: 14) {
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 6) {
                         Image(systemName: "sparkles").foregroundStyle(accent)
                         Text("Adaptive Enhance").font(.system(size: 12, weight: .semibold))
                         Spacer()
                         Text(processing ? "\(progress)%" : "Auto")
-                            .font(.system(size: 10)).foregroundStyle(secondary)
+                            .font(.system(size: 9)).foregroundStyle(secondary)
                     }
                     Label(clip.fps >= 59.5 ? "Source already 60 FPS — skip interpolation" : "Lower FPS → target smooth 60 FPS", systemImage: "checkmark")
                     Label("Natural color and original audio", systemImage: "checkmark")
                     Label("Preserve source HDR when supported", systemImage: "checkmark")
                     if processing {
-                        ProgressView(value: Double(progress), total: 100).tint(accent)
-                        Text(stage).font(.system(size: 10)).foregroundStyle(secondary)
+                        ProgressView(value: Double(progress), total: 100)
+                        Text(stage).font(.system(size: 9)).foregroundStyle(secondary)
                     }
-                }
-                .font(.system(size: 10))
-                .padding(10)
+                }.font(.system(size: 10)).padding(10)
             }
             if processing {
-                button("Stop checking status", symbol: "pause.circle", prominent: false) {
+                pillButton("Stop checking status", symbol: "pause.circle") {
                     activeTask?.cancel(); activeTask = nil
                     processing = false
                     stage = "Job continues on PC; reopen to reconnect"
                 }
             } else {
-                button("Enhance & Export", symbol: "sparkles", prominent: true) { beginProcessing() }
+                pillButton("Enhance & Export", symbol: "sparkles", prominent: true) { beginProcessing() }
                     .disabled(inputURL == nil || serverURL.isEmpty)
             }
             if serverURL.isEmpty {
@@ -631,72 +572,70 @@ struct ContentView: View {
                     .font(.system(size: 9)).foregroundStyle(secondary)
             }
             Spacer(minLength: 0)
-        }
+        }.padding(.horizontal, 14)
     }
 
-    private func result(compact: Bool) -> some View {
-        VStack(spacing: compact ? 7 : 11) {
-            pageHeader("Result")
-            glass(radius: 17) {
-                VStack(spacing: 5) {
+    private var resultScreen: some View {
+        VStack(spacing: 8) {
+            header("Result")
+            surface(radius: 16) {
+                VStack(spacing: 6) {
                     ZStack {
-                        Circle().strokeBorder(actionGradient, lineWidth: 2.5)
-                            .frame(width: 50, height: 50)
+                        Circle().strokeBorder(primaryGradient, lineWidth: 2.5)
+                            .frame(width: 52, height: 52)
                         Image(systemName: outputURL == nil ? "clock" : "checkmark")
-                            .font(.system(size: 21, weight: .semibold))
-                            .foregroundStyle(accent)
+                            .font(.system(size: 22, weight: .semibold)).foregroundStyle(accent)
                     }
-                    .padding(.bottom, 2)
-                    Text(outputURL == nil ? (processing ? "Enhancing Your Video" : "No completed video yet") : (savedPath == outputURL?.path ? "Video Saved Successfully" : "Video Ready"))
+                    Text(outputURL == nil ? (processing ? "Enhancing Your Video" : "No completed video yet") : "Video Ready")
                         .font(.system(size: 14, weight: .semibold))
-                    Text(outputURL == nil ? (processing ? "Processing \(progress)% — \(stage)" : "Your enhanced video will appear here after processing.") : "Preview your video, share it, or save to Photos.")
-                        .font(.system(size: 10)).foregroundStyle(secondary)
+                    Text(outputURL == nil ? (processing ? "Processing \(progress)% — \(stage)" : "Your enhanced video will appear here after processing.") : "Your video has finished processing.")
+                        .font(.system(size: 9)).foregroundStyle(secondary)
                         .multilineTextAlignment(.center)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, compact ? 10 : 12)
+                }.frame(maxWidth: .infinity).padding(.vertical, 11)
             }
-
-            glass(radius: 17) {
-                videoPanel(height: compact ? 154 : 185, resultVideo: true)
-                    .padding(8)
-            }
-            sectionHeading("Video Details")
-            glass(radius: 14) {
-                HStack(spacing: 4) {
-                    compactStat("viewfinder", outputURL == nil ? "—" : resolution, "Resolution")
-                    Rectangle().fill(borderColor).frame(width: 1, height: 28)
-                    compactStat("speedometer", outputURL == nil ? "—" : "60 FPS", "Output target")
-                    Rectangle().fill(borderColor).frame(width: 1, height: 28)
-                    compactStat("checkmark.seal", outputURL == nil ? "Pending" : "Ready", "Status")
-                }.padding(.vertical, 9)
-            }
-            glass(radius: 14) {
-                HStack(spacing: 8) {
-                    Image(systemName: "film.stack")
-                        .foregroundStyle(accent).font(.system(size: 17))
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(outputURL?.lastPathComponent ?? "No enhanced file available")
-                            .font(.system(size: 11, weight: .semibold)).lineLimit(1)
-                        Text(outputURL == nil ? "Process a video to unlock sharing" : "Enhanced MP4 · ready")
-                            .font(.system(size: 10)).foregroundStyle(secondary)
+            // Mockup's fake 2.8× chart is replaced with real output information.
+            surface(radius: 15) {
+                VStack(spacing: 7) {
+                    HStack {
+                        Image(systemName: "chart.bar").foregroundStyle(accent)
+                        Text("Video Details").font(.system(size: 12, weight: .semibold))
+                        Spacer()
                     }
-                    Spacer(minLength: 0)
-                }.padding(12)
+                    detailTriple([
+                        ("viewfinder", outputURL == nil ? "—" : resolution, "Resolution"),
+                        ("speedometer", outputURL == nil ? "—" : "60 FPS", "Output target"),
+                        ("checkmark.seal", outputURL == nil ? "Pending" : "Ready", "Status")
+                    ])
+                }.padding(10)
+            }
+            surface(radius: 15) {
+                VStack(spacing: 6) {
+                    videoPreview(height: 170, result: true)
+                    HStack {
+                        Image(systemName: "film.stack").foregroundStyle(accent)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(outputURL?.lastPathComponent ?? "No enhanced video yet")
+                                .font(.system(size: 11, weight: .semibold)).lineLimit(1)
+                            Text(outputURL == nil ? "Process a clip to unlock Share and Save" : "Enhanced MP4 · Ready")
+                                .font(.system(size: 9)).foregroundStyle(secondary)
+                        }
+                        Spacer()
+                    }
+                }.padding(8)
             }
             if let outputURL {
-                button("Share", symbol: "square.and.arrow.up", prominent: true) {
+                pillButton("Share", symbol: "square.and.arrow.up", prominent: true) {
                     shareItem = NaiseShareItem(url: outputURL)
                 }
-                button(savedPath == outputURL.path ? "Saved to Photos ✓" : "Save to Photos", symbol: "square.and.arrow.down", prominent: false) {
+                pillButton(savedPath == outputURL.path ? "Saved to Photos ✓" : "Save to Photos", symbol: "square.and.arrow.down") {
                     Task { await saveToPhotos(outputURL) }
                 }.disabled(savedPath == outputURL.path)
             } else {
-                button("Go to Enhance", symbol: "sparkles", prominent: true) { page = 1 }
-                button("Save to Photos", symbol: "square.and.arrow.down", prominent: false) {}.disabled(true)
+                pillButton("Go to Enhance", symbol: "sparkles", prominent: true) { page = 1 }
+                pillButton("Save to Photos", symbol: "square.and.arrow.down") {}.disabled(true)
             }
             Spacer(minLength: 0)
-        }
+        }.padding(.horizontal, 14)
     }
 
     // Reuse a single player when possible. Preview always uses the actual video.
