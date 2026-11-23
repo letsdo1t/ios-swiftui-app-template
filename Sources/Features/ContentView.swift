@@ -36,6 +36,7 @@ private struct NaiseClipInfo {
     var height = 0
     var fps: Double = 0
     var duration: Double = 0
+    var aspectRatio: CGFloat { width > 0 && height > 0 ? CGFloat(width) / CGFloat(height) : 16.0 / 9.0 }
     var label: String { "\(width)×\(height) · \(Int(fps.rounded())) FPS · \(Int(duration.rounded()))s" }
 }
 private struct NaiseShareItem: Identifiable { let id = UUID(); let url: URL }
@@ -303,15 +304,27 @@ struct ContentView: View {
         return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 
+    // Fit the imported video's display orientation inside the existing glass card.
+    // A portrait clip is shown tall, landscape wide; neither is cropped or stretched.
     private func playerFrame(minHeight: CGFloat, maxHeight: CGFloat, result: Bool = false) -> some View {
-        Group {
-            if let url = result ? outputURL : inputURL {
-                VideoPlayer(player: playerFor(url)).background(.black)
-            } else {
-                Color.clear.overlay { Image("NaiseSample").resizable().scaledToFill() }.clipped()
+        GeometryReader { geometry in
+            let ratio = clip.aspectRatio
+            let fittedWidth = min(geometry.size.width, geometry.size.height * ratio)
+            let fittedHeight = min(geometry.size.height, geometry.size.width / ratio)
+            ZStack {
+                Color.black
+                if let url = result ? outputURL : inputURL {
+                    VideoPlayer(player: playerFor(url))
+                        .frame(width: fittedWidth, height: fittedHeight)
+                } else {
+                    Image("NaiseSample").resizable().scaledToFill()
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .clipped()
+                }
             }
+            .frame(width: geometry.size.width, height: geometry.size.height)
         }
-        .frame(maxWidth: .infinity, minHeight: minHeight, maxHeight: maxHeight)
+        .frame(height: inputURL == nil ? minHeight : (clip.aspectRatio < 1 ? maxHeight : minHeight))
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
@@ -338,18 +351,18 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 9) {
             HStack {
                 (Text("Naise").foregroundColor(ink) + Text("+").foregroundColor(accent))
-                    .font(.system(size: 22, weight: .bold, design: .rounded))
+                    .font(.system(size: 27, weight: .bold, design: .rounded))
                 Spacer()
                 Button { settings = true } label: {
                     HStack(spacing: 5) {
-                        Image(systemName: "crown.fill").font(.system(size: 10)).foregroundStyle(dark ? .white : ink)
-                        Text("Pro").font(.system(size: 11, weight: .semibold))
+                        Image(systemName: "crown.fill").font(.system(size: 13)).foregroundStyle(dark ? .white : ink)
+                        Text("Pro").font(.system(size: 14, weight: .semibold))
                     }
-                    .padding(.horizontal, 11).frame(height: 26)
+                    .padding(.horizontal, 13).frame(height: 32)
                     .background(.thinMaterial, in: Capsule())
                     .overlay(Capsule().stroke(.white.opacity(dark ? 0.16 : 0.9), lineWidth: 0.7))
                 }.buttonStyle(.plain)
-            }.frame(height: 32)
+            }.frame(height: 38)
 
             VStack(alignment: .leading, spacing: 5) {
                 Text("Enhance Your\nVideos with AI").font(.system(size: 21, weight: .bold))
@@ -395,7 +408,7 @@ struct ContentView: View {
                         }
                         .font(.system(size: 9, weight: .medium)).foregroundStyle(.white).padding(10)
                     }
-                }.frame(minHeight: 172, maxHeight: 250).padding(6)
+                }.frame(height: inputURL == nil ? 172 : (clip.aspectRatio < 1 ? 250 : 172)).padding(6)
             }
 
             HStack(spacing: 6) {
@@ -485,7 +498,7 @@ struct ContentView: View {
                     })
                 }
             } else {
-                playerFrame(minHeight: 140, maxHeight: 230)
+                playerFrame(minHeight: 150, maxHeight: 230)
             }
             HStack {
                 Text("Original").padding(.horizontal, 8).padding(.vertical, 4)
@@ -496,7 +509,7 @@ struct ContentView: View {
             }
             .font(.system(size: 9, weight: .semibold)).foregroundStyle(.white).padding(7)
         }
-        .frame(minHeight: processing ? 130 : 150, maxHeight: 230)
+        .frame(height: inputURL == nil ? 150 : (clip.aspectRatio < 1 ? 230 : 150))
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
