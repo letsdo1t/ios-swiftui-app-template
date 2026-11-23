@@ -109,7 +109,9 @@ private enum NaiseAPI {
     }
 }
 
-// MARK: - Naise+ v12 UI: matches the Light / Dark poster + web mockup polish (iOS 17+)
+// MARK: - Naise+ v13 UI: matches the Light / Dark poster + web mockup polish (iOS 17+)
+// v13: scales to fill every iPhone (no empty gap at the bottom), flexible video/preview height,
+//      separate setting cards + separate result tiles like the mockup, Enhance & Export always full colour.
 // v12: progress-fill export button, animated success badge, animated quality chart,
 // dark-mode glow streak on Home, sharper before/after contrast. API logic unchanged.
 struct ContentView: View {
@@ -163,7 +165,7 @@ struct ContentView: View {
     var body: some View {
         GeometryReader { geometry in
             let w = geometry.size.width, h = geometry.size.height
-            let scale = min(1.0, w / 365.0, h / 690.0)
+            let scale = min(w / 365.0, h / 690.0)
             VStack(spacing: 0) {
                 Group {
                     switch page {
@@ -301,16 +303,21 @@ struct ContentView: View {
         return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 
-    private func playerFrame(height: CGFloat, result: Bool = false) -> some View {
+    private func playerFrame(minHeight: CGFloat, maxHeight: CGFloat, result: Bool = false) -> some View {
         Group {
             if let url = result ? outputURL : inputURL {
-                VideoPlayer(player: playerFor(url)).frame(height: height).background(.black)
+                VideoPlayer(player: playerFor(url)).background(.black)
             } else {
-                Image("NaiseSample").resizable().scaledToFill()
-                    .frame(maxWidth: .infinity).frame(height: height).clipped()
+                Color.clear.overlay { Image("NaiseSample").resizable().scaledToFill() }.clipped()
             }
         }
+        .frame(maxWidth: .infinity, minHeight: minHeight, maxHeight: maxHeight)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    // A gap that grows on tall phones (up to `max`) so the screen fills like the mockup.
+    private func flexGap(_ max: CGFloat) -> some View {
+        Spacer(minLength: 0).frame(maxHeight: max)
     }
 
     private func statTriple(_ values: [(String, String, String)]) -> some View {
@@ -364,9 +371,10 @@ struct ContentView: View {
                 }
             }
 
+            flexGap(8)
             surface(radius: 16) {
                 ZStack(alignment: .topLeading) {
-                    playerFrame(height: 172)
+                    playerFrame(minHeight: 172, maxHeight: 250)
                     Label("My Video.mp4", systemImage: "film")
                         .font(.system(size: 9, weight: .medium)).foregroundStyle(.white)
                         .padding(.horizontal, 8).padding(.vertical, 5)
@@ -387,7 +395,7 @@ struct ContentView: View {
                         }
                         .font(.system(size: 9, weight: .medium)).foregroundStyle(.white).padding(10)
                     }
-                }.frame(height: 172).padding(6)
+                }.frame(minHeight: 172, maxHeight: 250).padding(6)
             }
 
             HStack(spacing: 6) {
@@ -407,11 +415,12 @@ struct ContentView: View {
                 ])
             }
 
+            flexGap(6)
             PhotosPicker(selection: $selected, matching: .videos) {
                 gradientLabel("Import Video", symbol: "plus", gradient: blueGradient)
             }.buttonStyle(.plain).disabled(processing)
-            Spacer(minLength: 0)
-        }.padding(.horizontal, 14)
+            flexGap(18)
+        }.padding(.horizontal, 14).padding(.bottom, 6)
     }
 
     private func toolLabel(_ symbol: String, _ title: String) -> some View {
@@ -476,7 +485,7 @@ struct ContentView: View {
                     })
                 }
             } else {
-                playerFrame(height: 150)
+                playerFrame(minHeight: 140, maxHeight: 230)
             }
             HStack {
                 Text("Original").padding(.horizontal, 8).padding(.vertical, 4)
@@ -487,21 +496,22 @@ struct ContentView: View {
             }
             .font(.system(size: 9, weight: .semibold)).foregroundStyle(.white).padding(7)
         }
-        .frame(height: 150)
+        .frame(minHeight: processing ? 130 : 150, maxHeight: 230)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private var enhanceScreen: some View {
         VStack(spacing: 8) {
             header("Enhance")
+            flexGap(6)
             surface(radius: 16) { previewComparison.padding(6) }
             HStack(spacing: 6) {
                 Image(systemName: "sparkles").foregroundStyle(accent)
                 Text("Enhancement Settings").font(.system(size: 12.5, weight: .semibold))
                 Spacer()
             }
-            surface(radius: 15) {
-                VStack(spacing: 0) {
+            VStack(spacing: 6) {
+                surface(radius: 14) {
                     Menu {
                         ForEach(["YouTube", "TikTok", "Instagram", "WhatsApp"], id: \.self) { name in
                             Button(name) { platform = name }
@@ -512,12 +522,14 @@ struct ContentView: View {
                                 .font(.system(size: 10.5)).foregroundStyle(ink)
                         }
                     }.buttonStyle(.plain)
-                    Divider().padding(.horizontal, 10)
+                }
+                surface(radius: 14) {
                     settingsLine("play.rectangle", title: "Resolution", subtitle: "Output video quality") {
                         segmented(["1080p", "4K"], selection: resolution) { resolution = $0 }
                     }
-                    Divider().padding(.horizontal, 10)
-                    settingsLine("video", title: "Frame Rate", subtitle: "Smoother, more natural motion") {
+                }
+                surface(radius: 14) {
+                    settingsLine("film", title: "Frame Rate", subtitle: "Smoother, more natural motion") {
                         segmented(["30 FPS", "60 FPS"], selection: "\(fps) FPS") { fps = $0.hasPrefix("30") ? 30 : 60 }
                     }
                 }
@@ -530,8 +542,10 @@ struct ContentView: View {
                         Spacer()
                         Toggle("", isOn: $aiEnhance).labelsHidden().tint(blue).scaleEffect(0.82)
                     }
-                    ForEach(["Upscale & add detail", "Reduce noise & clean artifacts", "Improve color & dynamic range"], id: \.self) { line in
-                        Label(line, systemImage: "checkmark").font(.system(size: 10)).foregroundStyle(ink.opacity(0.9))
+                    if !processing {
+                        ForEach(["Upscale & add detail", "Reduce noise & clean artifacts", "Improve color & dynamic range"], id: \.self) { line in
+                            Label(line, systemImage: "checkmark").font(.system(size: 10)).foregroundStyle(ink.opacity(0.9))
+                        }
                     }
                     if processing {
                         ProgressView(value: Double(progress), total: 100).tint(accent)
@@ -547,16 +561,19 @@ struct ContentView: View {
                     stage = "Job continues on PC; reopen to reconnect"
                 }
             } else {
-                gradientButton("Enhance & Export", symbol: "sparkles", gradient: purpleGradient) { beginProcessing() }
-                    .opacity(inputURL == nil || serverURL.isEmpty ? 0.55 : 1)
-                    .disabled(inputURL == nil || serverURL.isEmpty)
+                gradientButton("Enhance & Export", symbol: "sparkles", gradient: purpleGradient) {
+                    if inputURL == nil {
+                        failure = "Import a video first (Home → Import Video)."
+                    } else if serverURL.isEmpty {
+                        failure = "Add your HTTPS tunnel URL in Settings (•••) to export."
+                        settings = true
+                    } else {
+                        beginProcessing()
+                    }
+                }
             }
-            if serverURL.isEmpty {
-                Text("Add your HTTPS tunnel URL in Settings (•••) to export.")
-                    .font(.system(size: 9)).foregroundStyle(secondary)
-            }
-            Spacer(minLength: 0)
-        }.padding(.horizontal, 14)
+            flexGap(18)
+        }.padding(.horizontal, 14).padding(.bottom, 6)
     }
 
     private var exportProgressButton: some View {
@@ -593,6 +610,7 @@ struct ContentView: View {
         let outDims = resolution == "4K" ? "(3840 × 2160)" : "(1920 × 1080)"
         return VStack(spacing: 8) {
             header("Result")
+            flexGap(6)
             surface(radius: 16) {
                 VStack(spacing: 5) {
                     ZStack {
@@ -634,12 +652,12 @@ struct ContentView: View {
                         qualityChart(active: done && scaleGain > 0,
                                      badge: "+\(Int(max(0, (scaleGain - 1) * 100)))%")
                     }
-                    statTriple([
-                        ("sparkles.tv", done ? outLabel : "—", done ? outDims : "Resolution"),
-                        ("square.stack.3d.up", done ? "\(fps) FPS" : "—", "Frame Rate"),
-                        ("externaldrive", outputURL.map { fileSizeText($0) } ?? "—", "File Size")
-                    ])
                 }.padding(11)
+            }
+            HStack(spacing: 6) {
+                resultTile("sparkles.tv", done ? outLabel : "—", done ? outDims : "Resolution", highlight: done)
+                resultTile("square.stack.3d.up", done ? "\(fps) FPS" : "—", "Frame Rate")
+                resultTile("externaldrive", outputURL.map { fileSizeText($0) } ?? "—", "File Size")
             }
             surface(radius: 14) {
                 HStack(spacing: 10) {
@@ -666,8 +684,21 @@ struct ContentView: View {
                 gradientButton("Go to Enhance", symbol: "sparkles", gradient: shareGradient) { page = 1 }
                 glassButton("Save to Photos", symbol: "square.and.arrow.down") {}.disabled(true).opacity(0.55)
             }
-            Spacer(minLength: 0)
-        }.padding(.horizontal, 14)
+            flexGap(18)
+        }.padding(.horizontal, 14).padding(.bottom, 6)
+    }
+
+    private func resultTile(_ symbol: String, _ value: String, _ caption: String, highlight: Bool = false) -> some View {
+        surface(radius: 14) {
+            VStack(spacing: 3) {
+                Image(systemName: symbol).font(.system(size: 13)).foregroundStyle(highlight ? accent : secondary)
+                Text(value).font(.system(size: 13, weight: .bold)).foregroundStyle(highlight ? accent : ink)
+                    .lineLimit(1).minimumScaleFactor(0.6)
+                Text(caption).font(.system(size: 8.5)).foregroundStyle(secondary)
+                    .lineLimit(2).multilineTextAlignment(.center).minimumScaleFactor(0.8)
+            }
+            .frame(maxWidth: .infinity).frame(height: 62).padding(.horizontal, 4)
+        }
     }
 
     private func qualityChart(active: Bool, badge: String) -> some View {
