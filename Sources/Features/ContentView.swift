@@ -4,7 +4,7 @@ import Photos
 import AVKit
 import UniformTypeIdentifiers
 
-// Naise+ UI refresh (iOS 17+). Uses the existing FastAPI job API:
+// Naise+ v10 UI (iOS 17+). Uses the existing FastAPI job API:
 // POST /process -> 202 {job_id}; GET /jobs/{id}; GET /jobs/{id}/download.
 // This is an app UI + client integration, not an implementation of RIFE/NVENC.
 
@@ -109,7 +109,7 @@ private enum NaiseAPI {
     }
 }
 
-// MARK: - Naise+ v9 visual refinement: locked Light/Dark poster references (iOS 17+)
+// MARK: - Naise+ v10 poster UI rebuild: locked Light/Dark poster references (iOS 17+)
 // Visual reference: compact 3-screen mockup. No fabricated quality metrics.
 struct ContentView: View {
     @Environment(\.colorScheme) private var scheme
@@ -269,13 +269,20 @@ struct ContentView: View {
             navItem("sparkles", "Enhance", 1)
             navItem("play.rectangle", "Result", 2)
         }
-        .padding(.vertical, 3)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 17))
-        .overlay { RoundedRectangle(cornerRadius: 17).strokeBorder(.white.opacity(dark ? 0.12 : 0.85)) }
+        .frame(height: 49)
+        .background {
+            RoundedRectangle(cornerRadius: 17, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 17).fill(dark ? .black.opacity(0.40) : .white.opacity(0.36))
+                }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 17))
+        .overlay { RoundedRectangle(cornerRadius: 17).strokeBorder(.white.opacity(dark ? 0.22 : 0.92), lineWidth: 0.8) }
         .padding(.horizontal, 13).padding(.bottom, 3)
     }
 
-    private func navItem(_ icon: String, _ label: String, _ destination: Int) -> some View {
+        private func navItem(_ icon: String, _ label: String, _ destination: Int) -> some View {
         Button { page = destination } label: {
             VStack(spacing: 3) {
                 Image(systemName: icon).font(.system(size: 17))
@@ -359,31 +366,33 @@ struct ContentView: View {
     }
 
     private var homeScreen: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center) {
                 (Text("Naise").foregroundColor(ink) + Text("+").foregroundColor(accent))
-                    .font(.system(size: 22, weight: .bold))
+                    .font(.system(size: 23, weight: .bold, design: .rounded))
                 Spacer()
-                // Settings remains available, without adding logo or notification icon.
                 navCircle("gearshape") { settings = true }
-            }.frame(height: 38)
+            }
+            .frame(height: 32)
 
-            Text("Enhance Your\nVideos with AI")
-                .font(.system(size: 20, weight: .bold))
-                .lineSpacing(-2).fixedSize(horizontal: false, vertical: true)
-            Text("Smooth motion, natural color, original audio.")
-                .font(.system(size: 10)).foregroundStyle(secondary)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Enhance Your\nVideos with AI")
+                    .font(.system(size: 20, weight: .bold))
+                    .lineSpacing(-1)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Smooth motion, natural color, original audio.")
+                    .font(.system(size: 10)).foregroundStyle(secondary)
+            }
 
-            surface(radius: 17) {
+            surface(radius: 16) {
                 VStack(spacing: 5) {
                     ZStack(alignment: .topLeading) {
-                        videoPreview(height: 172)
-                        if let inputURL {
+                        videoPreview(height: 177)
+                        if let _ = inputURL {
                             Text("My Video")
-                                .font(.system(size: 9))
-                                .lineLimit(1)
-                                .padding(.horizontal, 8).padding(.vertical, 4)
+                                .font(.system(size: 9, weight: .medium))
                                 .foregroundStyle(.white)
+                                .padding(.horizontal, 8).padding(.vertical, 5)
                                 .background(.black.opacity(0.55), in: Capsule())
                                 .padding(7)
                         }
@@ -393,16 +402,18 @@ struct ContentView: View {
                         Spacer()
                         if inputURL != nil { Text("\(Int(clip.duration.rounded()))s") }
                     }.font(.system(size: 9)).foregroundStyle(secondary)
-                }.padding(8)
+                }.padding(7)
             }
             HStack(spacing: 6) {
                 PhotosPicker(selection: $selected, matching: .videos) {
                     VStack(spacing: 4) {
-                        Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 17))
+                        Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 16))
                         Text("Replace").font(.system(size: 10))
-                    }.frame(maxWidth: .infinity).frame(height: 48)
-                }.buttonStyle(.plain).background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
-                    .disabled(inputURL == nil || processing)
+                    }.frame(maxWidth: .infinity).frame(height: 44)
+                }
+                .buttonStyle(.plain)
+                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                .disabled(inputURL == nil || processing)
                 tool("scissors", "Trim") { failure = "Trim is not available yet; source video has not been changed." }
                     .disabled(inputURL == nil)
                 tool("info.circle", "Details") { showInfo = true }
@@ -419,7 +430,7 @@ struct ContentView: View {
                 Label(inputURL == nil ? "Import Video" : "Import Another Video", systemImage: "plus")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity).frame(height: 40)
+                    .frame(maxWidth: .infinity).frame(height: 42)
                     .background(primaryGradient, in: RoundedRectangle(cornerRadius: 13))
             }.buttonStyle(.plain).disabled(processing)
             if inputURL != nil {
@@ -430,7 +441,7 @@ struct ContentView: View {
         .padding(.horizontal, 14)
     }
 
-    private func settingsLine(_ symbol: String, title: String, subtitle: String, @ViewBuilder trailing: () -> some View) -> some View {
+        private func settingsLine(_ symbol: String, title: String, subtitle: String, @ViewBuilder trailing: () -> some View) -> some View {
         HStack(spacing: 9) {
             Image(systemName: symbol).font(.system(size: 14)).frame(width: 21)
             VStack(alignment: .leading, spacing: 2) {
@@ -514,30 +525,32 @@ struct ContentView: View {
                 Text("Enhancement Settings").font(.system(size: 13, weight: .semibold))
                 Spacer()
             }.padding(.top, 1)
-            surface(radius: 13) {
-                Menu {
-                    ForEach(["WhatsApp", "Instagram", "TikTok", "YouTube"], id: \.self) { name in
-                        Button(name) { platform = name }
+
+            // The reference poster uses one grouped glass panel, not four tall blocks.
+            surface(radius: 15) {
+                VStack(spacing: 0) {
+                    Menu {
+                        ForEach(["WhatsApp", "Instagram", "TikTok", "YouTube"], id: \.self) { name in
+                            Button(name) { platform = name }
+                        }
+                    } label: {
+                        settingsLine("square.stack", title: "Platform", subtitle: "Optimize for your target platform") {
+                            Text(platform + " ›").font(.system(size: 10)).foregroundStyle(secondary)
+                        }
+                    }.buttonStyle(.plain)
+                    Divider().padding(.horizontal, 9)
+                    settingsLine("viewfinder", title: "Resolution", subtitle: "Output video quality") {
+                        resolutionChip("1080p")
+                        resolutionChip("4K")
                     }
-                } label: {
-                    settingsLine("square.stack", title: "Platform", subtitle: "Optimize for your target platform") {
-                        Text(platform + " ›").font(.system(size: 10)).foregroundStyle(secondary)
+                    Divider().padding(.horizontal, 9)
+                    settingsLine("video", title: "Frame Rate", subtitle: "Smooth motion output") {
+                        Text("60 FPS").font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12).frame(height: 27)
+                            .background(primaryGradient, in: Capsule())
                     }
-                }.buttonStyle(.plain)
-            }
-            surface(radius: 13) {
-                settingsLine("viewfinder", title: "Resolution", subtitle: "Output video quality") {
-                    resolutionChip("1080p")
-                    resolutionChip("4K")
-                }
-            }
-            surface(radius: 13) {
-                settingsLine("video", title: "Frame Rate", subtitle: "Smooth motion output") {
-                    Text("60 FPS").font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 12).frame(height: 27)
-                        .background(primaryGradient, in: Capsule())
-                }
+                }.padding(.horizontal, 5).padding(.vertical, 2)
             }
             surface(radius: 14) {
                 VStack(alignment: .leading, spacing: 5) {
@@ -575,32 +588,52 @@ struct ContentView: View {
         }.padding(.horizontal, 14)
     }
 
-    private var resultScreen: some View {
-        VStack(spacing: 7) {
+        private var resultScreen: some View {
+        VStack(spacing: 8) {
             header("Result")
             surface(radius: 16) {
-                VStack(spacing: 6) {
+                VStack(spacing: 5) {
                     ZStack {
-                        Circle().strokeBorder(primaryGradient, lineWidth: 2.5)
-                            .frame(width: 52, height: 52)
+                        Circle().strokeBorder(primaryGradient, lineWidth: 2.5).frame(width: 50, height: 50)
                         Image(systemName: outputURL == nil ? "clock" : "checkmark")
                             .font(.system(size: 22, weight: .semibold)).foregroundStyle(accent)
                     }
                     Text(outputURL == nil ? (processing ? "Enhancing Your Video" : "No completed video yet") : "Video Ready")
                         .font(.system(size: 14, weight: .semibold))
-                    Text(outputURL == nil ? (processing ? "Processing \(progress)% — \(stage)" : "Your enhanced video will appear here after processing.") : "Your video has finished processing.")
-                        .font(.system(size: 9)).foregroundStyle(secondary)
-                        .multilineTextAlignment(.center)
-                }.frame(maxWidth: .infinity).padding(.vertical, 11)
+                    Text(outputURL == nil ? (processing ? "Processing \(progress)% — \(stage)" : "Your enhanced video will appear here after processing.") : "Your enhanced video is ready to preview and save.")
+                        .font(.system(size: 9)).foregroundStyle(secondary).multilineTextAlignment(.center)
+                }.frame(maxWidth: .infinity).padding(.vertical, 10)
             }
-            // Mockup's fake 2.8× chart is replaced with real output information.
-            surface(radius: 15) {
-                VStack(spacing: 7) {
-                    HStack {
-                        Image(systemName: "chart.bar").foregroundStyle(accent)
+            // Match poster: one prominent analysis card containing metrics and a compact graph.
+            surface(radius: 16) {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "chart.bar.fill").foregroundStyle(accent)
                         Text("Output Analysis").font(.system(size: 12, weight: .semibold))
                         Spacer()
+                        Text(outputURL == nil ? "Awaiting video" : "Completed")
+                            .font(.system(size: 9)).foregroundStyle(secondary)
                     }
+                    HStack(alignment: .center, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(outputURL == nil ? "—" : "60 FPS")
+                                .font(.system(size: 21, weight: .bold))
+                            Text(outputURL == nil ? "Process a video first" : "Output target")
+                                .font(.system(size: 9)).foregroundStyle(secondary)
+                        }.frame(maxWidth: .infinity, alignment: .leading)
+                        ZStack(alignment: .bottomLeading) {
+                            RoundedRectangle(cornerRadius: 9).fill(dark ? Color.white.opacity(0.04) : Color.blue.opacity(0.04))
+                            Path { p in
+                                p.move(to: CGPoint(x: 0, y: 43))
+                                p.addCurve(to: CGPoint(x: 118, y: 8), control1: CGPoint(x: 35, y: 37), control2: CGPoint(x: 72, y: 14))
+                            }
+                            .stroke(outputURL == nil ? Color.gray.opacity(0.38) : accent,
+                                    style: StrokeStyle(lineWidth: 2.0, lineCap: .round))
+                            .padding(.horizontal, 6)
+                        }
+                        .frame(width: 130, height: 57)
+                    }
+                    Rectangle().fill(secondary.opacity(0.16)).frame(height: 1)
                     detailTriple([
                         ("viewfinder", outputURL == nil ? "—" : resolution, "Resolution"),
                         ("speedometer", outputURL == nil ? "—" : "60 FPS", "Frame Rate"),
@@ -608,20 +641,27 @@ struct ContentView: View {
                     ])
                 }.padding(10)
             }
-            surface(radius: 15) {
-                VStack(spacing: 6) {
-                    videoPreview(height: 122, result: true)
-                    HStack {
-                        Image(systemName: "film.stack").foregroundStyle(accent)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(outputURL?.lastPathComponent ?? "No enhanced video yet")
-                                .font(.system(size: 11, weight: .semibold)).lineLimit(1)
-                            Text(outputURL == nil ? "Process a clip to unlock Share and Save" : "Enhanced MP4 · Ready to share")
-                                .font(.system(size: 9)).foregroundStyle(secondary)
-                        }
-                        Spacer()
+            surface(radius: 14) {
+                HStack(spacing: 9) {
+                    if let outputURL {
+                        VideoPlayer(player: playerFor(outputURL))
+                            .frame(width: 72, height: 56)
+                            .background(.black)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                    } else {
+                        Image("NaiseSample").resizable().scaledToFill()
+                            .frame(width: 72, height: 56).clipped()
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
                     }
-                }.padding(8)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(outputURL?.lastPathComponent ?? "No enhanced video yet")
+                            .font(.system(size: 11, weight: .semibold)).lineLimit(1)
+                        Text(outputURL == nil ? "Process a clip to enable sharing" : "MP4 · Ready to share")
+                            .font(.system(size: 9)).foregroundStyle(secondary)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right").font(.system(size: 11)).foregroundStyle(secondary)
+                }.padding(9)
             }
             if let outputURL {
                 pillButton("Share", symbol: "square.and.arrow.up", prominent: true) {
@@ -638,7 +678,7 @@ struct ContentView: View {
         }.padding(.horizontal, 14)
     }
 
-    // Reuse a single player when possible. Preview always uses the actual video.
+        // Reuse a single player when possible. Preview always uses the actual video.
     private func playerFor(_ url: URL) -> AVPlayer {
         if let player, let current = (player.currentItem?.asset as? AVURLAsset)?.url, current == url { return player }
         let created = AVPlayer(url: url)
