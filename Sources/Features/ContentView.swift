@@ -109,7 +109,9 @@ private enum NaiseAPI {
     }
 }
 
-// MARK: - Naise+ v11 UI: matches the Light / Dark poster (iOS 17+)
+// MARK: - Naise+ v12 UI: matches the Light / Dark poster + web mockup polish (iOS 17+)
+// v12: progress-fill export button, animated success badge, animated quality chart,
+// dark-mode glow streak on Home, sharper before/after contrast. API logic unchanged.
 struct ContentView: View {
     @Environment(\.colorScheme) private var scheme
     @AppStorage("naiseServerURL") private var serverURL = ""
@@ -136,6 +138,9 @@ struct ContentView: View {
     @State private var activeTask: Task<Void, Never>?
     @State private var showInfo = false
     @State private var split: CGFloat = 0.5
+    @State private var chartDrawn: CGFloat = 0
+    @State private var badgePop = false
+    @State private var sparklePulse = false
 
     // MARK: Tokens
     private var dark: Bool { scheme == .dark }
@@ -346,6 +351,18 @@ struct ContentView: View {
                     .font(.system(size: 10)).foregroundStyle(secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(alignment: .trailing) {
+                if dark {
+                    Ellipse()
+                        .fill(LinearGradient(colors: [violet.opacity(0.55), blue.opacity(0.35)], startPoint: .leading, endPoint: .trailing))
+                        .frame(width: 260, height: 90)
+                        .rotationEffect(.degrees(-25))
+                        .blur(radius: 28)
+                        .offset(x: 90, y: -10)
+                        .allowsHitTesting(false)
+                }
+            }
 
             surface(radius: 16) {
                 ZStack(alignment: .topLeading) {
@@ -441,7 +458,7 @@ struct ContentView: View {
                     ZStack(alignment: .leading) {
                         Image("NaiseSample").resizable().scaledToFill()
                             .frame(width: g.size.width, height: g.size.height).clipped()
-                        Image("NaiseSample").resizable().scaledToFill().saturation(0.7).brightness(-0.05)
+                        Image("NaiseSample").resizable().scaledToFill().blur(radius: 1.6).saturation(0.55).contrast(0.82).brightness(-0.05)
                             .frame(width: g.size.width, height: g.size.height).clipped()
                             .mask(alignment: .leading) { Rectangle().frame(width: pos) }
                         Rectangle().fill(.white).frame(width: 2).offset(x: pos - 1)
@@ -523,6 +540,7 @@ struct ContentView: View {
                 }.padding(.horizontal, 12).padding(.vertical, 9)
             }
             if processing {
+                exportProgressButton
                 glassButton("Stop checking status", symbol: "pause.circle") {
                     activeTask?.cancel(); activeTask = nil
                     processing = false
@@ -541,6 +559,27 @@ struct ContentView: View {
         }.padding(.horizontal, 14)
     }
 
+    private var exportProgressButton: some View {
+        GeometryReader { g in
+            ZStack(alignment: .leading) {
+                Capsule().fill(purpleGradient)
+                Capsule().fill(.white.opacity(0.22))
+                    .frame(width: g.size.width * CGFloat(min(max(progress, 0), 100)) / 100)
+                    .animation(.easeOut(duration: 0.4), value: progress)
+                HStack(spacing: 6) {
+                    ProgressView().tint(.white).scaleEffect(0.7)
+                    Text("Enhancing… \(progress)%").font(.system(size: 14, weight: .semibold))
+                }
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .frame(height: 42)
+        .clipShape(Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.30), lineWidth: 0.8))
+        .shadow(color: violet.opacity(0.35), radius: 9, y: 3)
+    }
+
     // MARK: Result (only real values: resolution, FPS, file size)
     private var scaleGain: Double {
         let source = Double(min(clip.width, clip.height))
@@ -557,11 +596,21 @@ struct ContentView: View {
             surface(radius: 16) {
                 VStack(spacing: 5) {
                     ZStack {
-                        Circle().strokeBorder(dark ? purpleGradient : blueGradient, lineWidth: 2.5).frame(width: 52, height: 52)
+                        Circle().strokeBorder(LinearGradient(colors: [violet, blue], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 2.5)
+                            .frame(width: 52, height: 52)
                             .shadow(color: accent.opacity(0.5), radius: 8)
-                        Image(systemName: done ? "checkmark" : "clock").font(.system(size: 22, weight: .semibold)).foregroundStyle(accent)
-                        Image(systemName: "plus").font(.system(size: 8, weight: .bold)).foregroundStyle(accent).offset(x: 34, y: -22)
-                        Image(systemName: "plus").font(.system(size: 8, weight: .bold)).foregroundStyle(accent).offset(x: -36, y: 8)
+                        Image(systemName: done ? "checkmark" : "clock").font(.system(size: 22, weight: .bold)).foregroundStyle(accent)
+                        Image(systemName: "sparkle").font(.system(size: 9, weight: .bold)).foregroundStyle(blue)
+                            .offset(x: -36, y: 8).opacity(sparklePulse ? 1 : 0.3).scaleEffect(sparklePulse ? 1.1 : 0.8)
+                        Image(systemName: "sparkle").font(.system(size: 7, weight: .bold)).foregroundStyle(violet)
+                            .offset(x: 34, y: -22).opacity(sparklePulse ? 0.3 : 1).scaleEffect(sparklePulse ? 0.8 : 1.1)
+                    }
+                    .scaleEffect(badgePop ? 1 : 0.6)
+                    .opacity(badgePop ? 1 : 0)
+                    .onAppear {
+                        badgePop = false
+                        withAnimation(.spring(response: 0.5, dampingFraction: 0.55)) { badgePop = true }
+                        withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) { sparklePulse = true }
                     }
                     Text(saved ? "Video Saved Successfully" : done ? "Video Enhanced Successfully" : processing ? "Enhancing Your Video" : "No enhanced video yet")
                         .font(.system(size: 14, weight: .semibold))
@@ -627,7 +676,9 @@ struct ContentView: View {
             Path { p in
                 p.move(to: CGPoint(x: 0, y: 50))
                 p.addCurve(to: CGPoint(x: 150, y: 12), control1: CGPoint(x: 50, y: 48), control2: CGPoint(x: 95, y: 18))
-            }.stroke(line, style: StrokeStyle(lineWidth: 2.2, lineCap: .round))
+            }
+            .trim(from: 0, to: active ? chartDrawn : 1)
+            .stroke(line, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
             Path { p in
                 p.move(to: CGPoint(x: 0, y: 50))
                 p.addCurve(to: CGPoint(x: 150, y: 12), control1: CGPoint(x: 50, y: 48), control2: CGPoint(x: 95, y: 18))
@@ -640,6 +691,10 @@ struct ContentView: View {
             }
         }
         .frame(width: 150, height: 58)
+        .onAppear {
+            chartDrawn = 0
+            withAnimation(.easeOut(duration: 1.4)) { chartDrawn = 1 }
+        }
     }
 
         // Reuse a single player when possible. Preview always uses the actual video.
