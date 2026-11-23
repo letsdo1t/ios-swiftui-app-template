@@ -351,7 +351,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 9) {
             HStack {
                 (Text("Naise").foregroundColor(ink) + Text("+").foregroundColor(accent))
-                    .font(.system(size: 27, weight: .bold, design: .rounded))
+                    .font(.system(size: 32, weight: .bold, design: .rounded))
                 Spacer()
                 Button { settings = true } label: {
                     HStack(spacing: 5) {
