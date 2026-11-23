@@ -1,1327 +1,507 @@
 import SwiftUI
 import PhotosUI
 import Photos
-import AVFoundation
-import CoreImage
-import CoreImage.CIFilterBuiltins
-import UIKit
+import AVKit
 import UniformTypeIdentifiers
 
-// MARK: - Models
+// Naise+ UI refresh (iOS 17+). Uses the existing FastAPI job API:
+// POST /process -> 202 {job_id}; GET /jobs/{id}; GET /jobs/{id}/download.
+// This is an app UI + client integration, not an implementation of RIFE/NVENC.
 
-private enum EnhanceStep: String, CaseIterable, Identifiable {
-    case importClip = "Import"
-    case profile = "Profile"
-    case render = "Render"
-    case ready = "Ready"
-    var id: String { rawValue }
-}
-
-private struct StatusLogEntry: Identifiable {
-    let id = UUID()
-    let timeText: String
-    let message: String
-}
-
-private struct SourceClipInfo {
-    let width: Int      // oriented (after rotation)
-    let height: Int
-    let durationSeconds: Double
-    let fps: Double
-
-    var summary: String {
-        let mins = Int(durationSeconds) / 60
-        let secs = Int(durationSeconds) % 60
-        return "\(width)×\(height) · \(String(format: "%d:%02d", mins, secs)) · \(Int(fps.rounded()))fps"
-    }
-}
-
-/// Video dari PhotosPicker: disalin terus ke file (tak load seluruh video dalam RAM).
-private struct PickedVideo: Transferable {
+private struct NaisePickedVideo: Transferable {
     let url: URL
     static var transferRepresentation: some TransferRepresentation {
-        FileRepresentation(contentType: .movie) { video in
-            SentTransferredFile(video.url)
+        FileRepresentation(contentType: .movie) { item in
+            SentTransferredFile(item.url)
         } importing: { received in
             let ext = received.file.pathExtension.isEmpty ? "mov" : received.file.pathExtension
             let dest = FileManager.default.temporaryDirectory
-                .appendingPathComponent(UUID().uuidString)
-                .appendingPathExtension(ext)
+                .appendingPathComponent(UUID().uuidString).appendingPathExtension(ext)
             try FileManager.default.copyItem(at: received.file, to: dest)
-            return PickedVideo(url: dest)
+            return NaisePickedVideo(url: dest)
         }
     }
 }
 
-private struct ExportedVideoDocument: FileDocument {
-    static var readableContentTypes: [UTType] { [.mpeg4Movie, .movie] }
-    let sourceURL: URL
-
-    init(sourceURL: URL) { self.sourceURL = sourceURL }
-    init(configuration: ReadConfiguration) throws { throw CocoaError(.fileReadUnsupportedScheme) }
-
-    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
-        // Tanpa .immediate → tak baca seluruh file masuk memori
-        try FileWrapper(url: sourceURL, options: [])
+private struct NaiseJobCreated: Decodable { let job_id: String }
+private struct NaiseJobStatus: Decodable {
+    let state: String
+    let progress: Int
+    let stage: String?
+    let error: String?
+    let engine: String?
+}
+private struct NaiseClipInfo {
+    var width = 0
+    var height = 0
+    var fps: Double = 0
+    var duration: Double = 0
+    var label: String { "\(width)×\(height) · \(Int(fps.rounded())) FPS · \(Int(duration.rounded()))s" }
+}
+private struct NaiseShareItem: Identifiable { let id = UUID(); let url: URL }
+private struct NaiseShareSheet: UIViewControllerRepresentable {
+    let url: URL
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: [url], applicationActivities: nil)
     }
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
 
-// MARK: - Export planning (pure logic, mudah di-test)
-
-private struct EnhanceSettings {
-    var platform: String
-    var resolution: String
-    var requestedFPS: Int
-    var upscale: Bool
-    var useAI: Bool
-    var detail: Double = 1.0     // pengganda sharpen: Natural 0.6 / Crisp 1.0 / Strong 1.8
-}
-
-private struct ExportPlan {
-    let outputSize: CGSize
-    let fps: Int
-    let bitrate: Int          // bits per second
-    let upscaled: Bool
-    var usedAI = false
-    var aiRequested = false
-
-    var summary: String {
-        "\(Int(outputSize.width))×\(Int(outputSize.height)) · \(fps)fps · \(String(format: "%.1f", Double(bitrate) / 1_000_000)) Mbps" + (usedAI ? " · AI" : (aiRequested ? " · AI skipped" : ""))
+private enum NaiseAPI {
+    static func request(_ path: String, base: String, token: String, method: String = "GET") throws -> URLRequest {
+        guard let url = URL(string: base.trimmingCharacters(in: .whitespacesAndNewlines)),
+              url.scheme == "https", url.host != nil else {
+            throw NSError(domain: "Naise+", code: 1, userInfo: [NSLocalizedDescriptionKey: "Set your current HTTPS tunnel URL in Settings."])
+        }
+        var req = URLRequest(url: url.appendingPathComponent(path))
+        req.httpMethod = method
+        req.timeoutInterval = 120
+        if !token.isEmpty { req.setValue(token, forHTTPHeaderField: "X-API-Key") }
+        return req
+    }
+    static func validated(_ response: URLResponse, data: Data, expected: Int) throws {
+        guard let http = response as? HTTPURLResponse else {
+            throw NSError(domain: "Naise+", code: 2, userInfo: [NSLocalizedDescriptionKey: "No HTTP response"])
+        }
+        guard http.statusCode == expected else {
+            let detail = String(data: data.prefix(260), encoding: .utf8) ?? "Unknown error"
+            throw NSError(domain: "Naise+", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "Server \(http.statusCode): \(detail)"])
+        }
+    }
+    static func upload(video: URL, resolution: String, base: String, token: String) async throws -> String {
+        let boundary = "Naise-\(UUID().uuidString)"
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".multipart")
+        defer { try? FileManager.default.removeItem(at: path) }
+        FileManager.default.createFile(atPath: path.path, contents: nil)
+        let output = try FileHandle(forWritingTo: path)
+        defer { try? output.close() }
+        func write(_ value: String) throws { try output.write(contentsOf: Data(value.utf8)) }
+        func field(_ name: String, _ value: String) throws {
+            try write("--\(boundary)\r\nContent-Disposition: form-data; name=\"\(name)\"\r\n\r\n\(value)\r\n")
+        }
+        try field("resolution", resolution)
+        try field("fps", "60")  // Locked to 60 FPS.
+        try write("--\(boundary)\r\nContent-Disposition: form-data; name=\"video\"; filename=\"input.mov\"\r\nContent-Type: application/octet-stream\r\n\r\n")
+        let input = try FileHandle(forReadingFrom: video)
+        defer { try? input.close() }
+        while let chunk = try input.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+            try output.write(contentsOf: chunk)
+        }
+        try write("\r\n--\(boundary)--\r\n")
+        try output.synchronize()
+        var req = try request("process", base: base, token: token, method: "POST")
+        req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        let (data, response) = try await URLSession.shared.upload(for: req, fromFile: path)
+        try validated(response, data: data, expected: 202)
+        return try JSONDecoder().decode(NaiseJobCreated.self, from: data).job_id
+    }
+    static func status(job: String, base: String, token: String) async throws -> NaiseJobStatus {
+        let (data, response) = try await URLSession.shared.data(for: request("jobs/\(job)", base: base, token: token))
+        try validated(response, data: data, expected: 200)
+        return try JSONDecoder().decode(NaiseJobStatus.self, from: data)
+    }
+    static func download(job: String, base: String, token: String) async throws -> URL {
+        let (data, response) = try await URLSession.shared.data(for: request("jobs/\(job)/download", base: base, token: token))
+        try validated(response, data: data, expected: 200)
+        let dest = FileManager.default.temporaryDirectory.appendingPathComponent("NaisePlus_\(UUID().uuidString).mp4")
+        try data.write(to: dest, options: .atomic)
+        return dest
     }
 }
-
-private func planExport(orientedSize: CGSize, sourceFPS: Double, settings: EnhanceSettings, durationSeconds: Double) -> ExportPlan {
-    // "4K" = sisi panjang 3840 (versi lama tersilap 2160)
-    var targetLong: CGFloat = switch settings.resolution {
-    case "720p": 1280
-    case "1080p": 1920
-    default: 3840
-    }
-    if settings.platform == "WhatsApp" { targetLong = min(targetLong, 1280) }
-
-    let srcLong = max(orientedSize.width, orientedSize.height)
-    var scale = targetLong / srcLong
-    if settings.upscale {
-        scale = min(scale, 2.0)      // jangan upscale melampau
-    } else {
-        scale = min(scale, 1.0)
-    }
-
-    let w = max(2, (orientedSize.width * scale / 2).rounded() * 2)
-    let h = max(2, (orientedSize.height * scale / 2).rounded() * 2)
-
-    // FPS: jangan "reka" frame. 30fps → 60fps cuma duplicate frame (membazir bitrate, tak lagi smooth).
-    let srcRounded = max(1, Int(sourceFPS.rounded()))
-    let fps = max(1, min(settings.requestedFPS, srcRounded))
-
-    // Bitrate ikut bilangan pixel (bpp ≈ 0.19 @30fps), bukan nombor tetap.
-    let pixels = Double(w * h)
-    let fpsScale = pow(Double(fps) / 30.0, 0.7)
-    var bitrate = pixels * 30.0 * 0.19 * fpsScale
-    if settings.platform == "WhatsApp" { bitrate *= 0.75 }
-    bitrate = min(45_000_000, max(3_000_000, bitrate))
-    if settings.platform == "WhatsApp" {
-        // Kekalkan setiap fail di bawah ~14 MB (selamat bawah had 16 MB yang sering disebut)
-        let cap = (14_000_000.0 * 8.0) / max(1.0, durationSeconds) - 192_000.0
-        bitrate = min(bitrate, max(900_000.0, cap))
-    }
-
-    return ExportPlan(
-        outputSize: CGSize(width: w, height: h),
-        fps: fps,
-        bitrate: Int(bitrate),
-        upscaled: scale > 1.001
-    )
-}
-
-/// Bahagikan klip panjang kepada bahagian sama panjang (setiap satu ≤ partSeconds).
-/// partSeconds nil atau klip pendek → satu fail sahaja.
-private func partPlan(total: Double, partSeconds: Double?) -> (count: Int, each: Double) {
-    guard let partSeconds, partSeconds > 0, total > partSeconds + 0.5 else {
-        return (1, max(total, 0.01))
-    }
-    let count = Int((total / partSeconds).rounded(.up))
-    return (count, total / Double(count))
-}
-
-// MARK: - Transcoder (AVAssetReader → CoreImage/Metal → AVAssetWriter)
-
-private enum NaiseError: LocalizedError {
-    case noVideoTrack, invalidSize, cannotStartReader(String), cannotStartWriter(String)
-    case unsupportedSettings, failed(String), cancelled
-
-    var errorDescription: String? {
-        switch self {
-        case .noVideoTrack: return "No video track found"
-        case .invalidSize: return "Invalid video dimensions"
-        case .cannotStartReader(let m): return "Cannot read clip: \(m)"
-        case .cannotStartWriter(let m): return "Cannot write clip: \(m)"
-        case .unsupportedSettings: return "This device can't encode these settings. Try a lower resolution."
-        case .failed(let m): return m
-        case .cancelled: return "Export cancelled"
-        }
-    }
-}
-
-private final class NaiseTranscoder: @unchecked Sendable {
-    private let ciContext: CIContext
-    private let lock = NSLock()
-    private var cancelledFlag = false
-
-    init() {
-        let options: [CIContextOption: Any] = [.cacheIntermediates: false]
-        if let device = MTLCreateSystemDefaultDevice() {
-            ciContext = CIContext(mtlDevice: device, options: options)
-        } else {
-            ciContext = CIContext(options: options)
-        }
-    }
-
-    func cancel() { lock.lock(); cancelledFlag = true; lock.unlock() }
-    private var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelledFlag }
-
-    private func orientation(for t: CGAffineTransform) -> CGImagePropertyOrientation {
-        switch (t.a.rounded(), t.b.rounded(), t.c.rounded(), t.d.rounded()) {
-        case (0, 1, -1, 0): return .right
-        case (0, -1, 1, 0): return .left
-        case (-1, 0, 0, -1): return .down
-        default: return .up
-        }
-    }
-
-    func export(
-        inputURL: URL,
-        outputDirectory: URL,
-        settings: EnhanceSettings,
-        partSeconds: Double?,
-        onProgress: @escaping @Sendable (Double) -> Void
-    ) async throws -> (urls: [URL], plan: ExportPlan) {
-        try await withTaskCancellationHandler {
-            let asset = AVURLAsset(url: inputURL)
-            let duration = try await asset.load(.duration)
-            let layout = partPlan(total: CMTimeGetSeconds(duration), partSeconds: partSeconds)
-
-            var urls: [URL] = []
-            var currentOutput: URL?
-            var lastResult: ExportPlan?
-
-            do {
-                for index in 0..<layout.count {
-                    let out = outputDirectory
-                        .appendingPathComponent("NaisePlus_\(UUID().uuidString)_p\(index + 1)")
-                        .appendingPathExtension("mp4")
-                    currentOutput = out
-
-                    var segment: CMTimeRange?
-                    if layout.count > 1 {
-                        segment = CMTimeRange(
-                            start: CMTime(seconds: layout.each * Double(index), preferredTimescale: 600),
-                            duration: CMTime(seconds: layout.each, preferredTimescale: 600)
-                        )
-                    }
-
-                    let finishedParts = Double(index)
-                    let allParts = Double(layout.count)
-                    lastResult = try await run(
-                        inputURL: inputURL,
-                        outputURL: out,
-                        settings: settings,
-                        segment: segment,
-                        onProgress: { p in onProgress((finishedParts + p) / allParts) }
-                    )
-                    urls.append(out)
-                    currentOutput = nil
-                }
-            } catch {
-                if let currentOutput { try? FileManager.default.removeItem(at: currentOutput) }
-                for url in urls { try? FileManager.default.removeItem(at: url) }
-                throw error
-            }
-
-            guard let finalPlan = lastResult else { throw NaiseError.failed("Nothing was exported") }
-            return (urls: urls, plan: finalPlan)
-        } onCancel: {
-            self.cancel()
-        }
-    }
-
-    private func run(
-        inputURL: URL,
-        outputURL: URL,
-        settings: EnhanceSettings,
-        segment: CMTimeRange?,
-        onProgress: @escaping @Sendable (Double) -> Void
-    ) async throws -> ExportPlan {
-        let asset = AVURLAsset(url: inputURL)
-        guard let vTrack = try await asset.loadTracks(withMediaType: .video).first else { throw NaiseError.noVideoTrack }
-
-        let natural = try await vTrack.load(.naturalSize)
-        let transform = try await vTrack.load(.preferredTransform)
-        let timeRange = try await vTrack.load(.timeRange)
-        let nominalFPS = Double(try await vTrack.load(.nominalFrameRate))
-        let characteristics = try await vTrack.load(.mediaCharacteristics)
-        let isHDR = characteristics.contains(.containsHDRVideo)
-
-        let orient = orientation(for: transform)
-        let swap = (orient == .left || orient == .right)
-        let orientedSize = swap
-            ? CGSize(width: natural.height, height: natural.width)
-            : natural
-        guard orientedSize.width > 0, orientedSize.height > 0 else { throw NaiseError.invalidSize }
-
-        let sourceFPS = nominalFPS > 0 ? nominalFPS : 30
-        let activeRange: CMTimeRange = segment.map {
-            CMTimeRange(start: CMTimeAdd(timeRange.start, $0.start), duration: $0.duration)
-        } ?? timeRange
-        let basePlan = planExport(
-            orientedSize: orientedSize,
-            sourceFPS: sourceFPS,
-            settings: settings,
-            durationSeconds: max(0.01, CMTimeGetSeconds(activeRange.duration))
-        )
-
-        // AI super-resolution (iOS 26+). Nil → automatik guna mod Clean.
-        let aiStage: NaiseFrameUpscaler? = settings.useAI
-            ? await makeNaiseAIUpscaler(
-                width: Int(orientedSize.width),
-                height: Int(orientedSize.height),
-                requiredScale: basePlan.outputSize.height / orientedSize.height
-            )
-            : nil
-        var planWithAI = basePlan
-        planWithAI.usedAI = (aiStage != nil)
-        planWithAI.aiRequested = settings.useAI
-        let plan = planWithAI
-        let outW = plan.outputSize.width, outH = plan.outputSize.height
-        let outRect = CGRect(origin: .zero, size: plan.outputSize)
-
-        try? FileManager.default.removeItem(at: outputURL)
-
-        // ---- Reader ----
-        let reader = try AVAssetReader(asset: asset)
-        if segment != nil { reader.timeRange = activeRange }
-
-        var vReadSettings: [String: Any] = [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
-        ]
-        if isHDR {
-            // HDR (HLG/Dolby Vision iPhone) → tukar ke SDR Rec.709 supaya warna tak pudar
-            vReadSettings[AVVideoColorPropertiesKey] = [
-                AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
-                AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
-                AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2
-            ]
-        }
-        let vOutput = AVAssetReaderTrackOutput(track: vTrack, outputSettings: vReadSettings)
-        vOutput.alwaysCopiesSampleData = false
-        guard reader.canAdd(vOutput) else { throw NaiseError.cannotStartReader("video output") }
-        reader.add(vOutput)
-
-        var aOutput: AVAssetReaderTrackOutput?
-        if let aTrack = try await asset.loadTracks(withMediaType: .audio).first {
-            let out = AVAssetReaderTrackOutput(track: aTrack, outputSettings: [
-                AVFormatIDKey: kAudioFormatLinearPCM,
-                AVLinearPCMBitDepthKey: 16,
-                AVLinearPCMIsFloatKey: false,
-                AVLinearPCMIsBigEndianKey: false,
-                AVLinearPCMIsNonInterleaved: false,
-                AVNumberOfChannelsKey: 2,
-                AVSampleRateKey: 48_000
-            ])
-            if reader.canAdd(out) { reader.add(out); aOutput = out }
-        }
-
-        // ---- Writer ----
-        let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
-        writer.shouldOptimizeForNetworkUse = true   // faststart → upload cepat mula
-
-        func videoSettings(codec: AVVideoCodecType, bitrate: Int) -> [String: Any] {
-            var compression: [String: Any] = [
-                AVVideoAverageBitRateKey: bitrate,
-                AVVideoMaxKeyFrameIntervalKey: plan.fps * 2,
-                AVVideoExpectedSourceFrameRateKey: plan.fps,
-                AVVideoAllowFrameReorderingKey: true
-            ]
-            if codec == .h264 {
-                compression[AVVideoProfileLevelKey] = AVVideoProfileLevelH264HighAutoLevel
-                compression[AVVideoH264EntropyModeKey] = AVVideoH264EntropyModeCABAC
-            }
-            return [
-                AVVideoCodecKey: codec,
-                AVVideoWidthKey: Int(outW),
-                AVVideoHeightKey: Int(outH),
-                AVVideoColorPropertiesKey: [
-                    AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
-                    AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
-                    AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2
-                ],
-                AVVideoCompressionPropertiesKey: compression
-            ]
-        }
-
-        // H.264 dulu (paling serasi dengan IG/TikTok/WhatsApp); kalau device tak support, jatuh ke HEVC
-        var chosen = videoSettings(codec: .h264, bitrate: plan.bitrate)
-        if !writer.canApply(outputSettings: chosen, forMediaType: .video) {
-            chosen = videoSettings(codec: .hevc, bitrate: Int(Double(plan.bitrate) * 0.7))
-            guard writer.canApply(outputSettings: chosen, forMediaType: .video) else { throw NaiseError.unsupportedSettings }
-        }
-
-        let vInput = AVAssetWriterInput(mediaType: .video, outputSettings: chosen)
-        vInput.expectsMediaDataInRealTime = false
-        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
-            assetWriterInput: vInput,
-            sourcePixelBufferAttributes: [
-                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-                kCVPixelBufferWidthKey as String: Int(outW),
-                kCVPixelBufferHeightKey as String: Int(outH),
-                kCVPixelBufferMetalCompatibilityKey as String: true,
-                kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any]()
-            ]
-        )
-        guard writer.canAdd(vInput) else { throw NaiseError.cannotStartWriter("video input") }
-        writer.add(vInput)
-
-        var aInput: AVAssetWriterInput?
-        if aOutput != nil {
-            let input = AVAssetWriterInput(mediaType: .audio, outputSettings: [
-                AVFormatIDKey: kAudioFormatMPEG4AAC,
-                AVNumberOfChannelsKey: 2,
-                AVSampleRateKey: 48_000,
-                AVEncoderBitRateKey: 192_000
-            ])
-            input.expectsMediaDataInRealTime = false
-            if writer.canAdd(input) { writer.add(input); aInput = input }
-        }
-
-        guard reader.startReading() else {
-            throw NaiseError.cannotStartReader(reader.error?.localizedDescription ?? "unknown")
-        }
-        guard writer.startWriting() else {
-            throw NaiseError.cannotStartWriter(writer.error?.localizedDescription ?? "unknown")
-        }
-        let startTime = activeRange.start
-        writer.startSession(atSourceTime: startTime)
-
-        // ---- Per-frame pipeline ----
-        let totalSeconds = max(0.001, CMTimeGetSeconds(activeRange.duration))
-        let startSeconds = CMTimeGetSeconds(startTime)
-        let interval = 1.0 / Double(plan.fps)
-        let needsDrop = sourceFPS > Double(plan.fps) + 1.5   // contoh 60 → 30
-        let sharpness: Double = {
-            var s: Double = switch settings.platform {
-            case "WhatsApp": 0.30
-            case "TikTok", "Instagram": 0.22
-            default: 0.18
-            }
-            if plan.upscaled { s += 0.06 }
-            return min(1.2, s * settings.detail)
-        }()
-        let denoiseLevel: Float = plan.upscaled ? 0.015 : 0.008
-        let allowDenoise = max(outW, outH) <= 2500    // 4K: skip, terlalu berat & tak perlu
-        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
-        let ctx = ciContext
-        let srcW = orientedSize.width, srcH = orientedSize.height
-
-        func enhance(_ buffer: CVPixelBuffer, pts: CMTime) -> CIImage {
-            var image = CIImage(cvPixelBuffer: buffer).oriented(orient)
-            image = image.transformed(by: CGAffineTransform(translationX: -image.extent.minX, y: -image.extent.minY))
-
-            // 1) Denoise dulu di resolusi asal (murah & elak noise di-upscale)
-            if allowDenoise {
-                let nr = CIFilter.noiseReduction()
-                nr.inputImage = image
-                nr.noiseLevel = denoiseLevel
-                nr.sharpness = 0.30
-                if let out = nr.outputImage { image = out.cropped(to: CGRect(x: 0, y: 0, width: srcW, height: srcH)) }
-            }
-
-            // 2) AI super-resolution (kalau tersedia) sebelum resize akhir
-            if let aiStage, let up = aiStage.upscale(image, pts: pts, context: ctx) {
-                image = up
-            }
-
-            // 3) Lanczos resize ke saiz akhir (kualiti jauh lebih baik dari affine biasa)
-            let curW = image.extent.width, curH = image.extent.height
-            if abs(outH - curH) > 0.5 || abs(outW - curW) > 0.5 {
-                let scaleY = outH / curH
-                let scaleX = outW / curW
-                let lz = CIFilter.lanczosScaleTransform()
-                lz.inputImage = image
-                lz.scale = Float(scaleY)
-                lz.aspectRatio = Float(scaleX / scaleY)
-                if let out = lz.outputImage { image = out }
-            }
-            image = image.cropped(to: outRect)
-
-            // 3) Sharpen LEPAS resize (versi lama sharpen sebelum denoise → effect hilang)
-            let sh = CIFilter.sharpenLuminance()
-            sh.inputImage = image
-            sh.sharpness = Float(sharpness)
-            if let out = sh.outputImage { image = out.cropped(to: outRect) }
-
-            // 4) Colour sedikit
-            let cc = CIFilter.colorControls()
-            cc.inputImage = image
-            cc.contrast = 1.02
-            cc.saturation = 1.01
-            cc.brightness = 0
-            if let out = cc.outputImage { image = out.cropped(to: outRect) }
-            return image
-        }
-
-        let group = DispatchGroup()
-        let videoQueue = DispatchQueue(label: "naise.video.write", qos: .userInitiated)
-        let audioQueue = DispatchQueue(label: "naise.audio.write", qos: .userInitiated)
-
-        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<ExportPlan, Error>) in
-            var videoDone = false
-            var nextEmit = startSeconds
-            var lastReported = 0.0
-
-            group.enter()
-            vInput.requestMediaDataWhenReady(on: videoQueue) { [self] in
-                guard !videoDone else { return }
-                while vInput.isReadyForMoreMediaData {
-                    var finish = isCancelled || reader.status != .reading || writer.status != .writing
-                    var sampleToProcess: CMSampleBuffer?
-                    if !finish {
-                        sampleToProcess = vOutput.copyNextSampleBuffer()
-                        finish = (sampleToProcess == nil)
-                    }
-                    if finish {
-                        videoDone = true
-                        vInput.markAsFinished()
-                        group.leave()
-                        return
-                    }
-                    guard let sample = sampleToProcess,
-                          let srcBuffer = CMSampleBufferGetImageBuffer(sample) else { continue }
-
-                    let pts = CMSampleBufferGetPresentationTimeStamp(sample)
-                    let t = CMTimeGetSeconds(pts)
-
-                    if needsDrop {
-                        if t < nextEmit - interval * 0.4 { continue }
-                        nextEmit += interval
-                        if nextEmit < t { nextEmit = t + interval }
-                    }
-
-                    var ok = true
-                    autoreleasepool {
-                        guard let pool = adaptor.pixelBufferPool else { ok = false; return }
-                        var dst: CVPixelBuffer?
-                        CVPixelBufferPoolCreatePixelBuffer(nil, pool, &dst)
-                        guard let dstBuffer = dst else { ok = false; return }
-                        ctx.render(enhance(srcBuffer, pts: pts), to: dstBuffer, bounds: outRect, colorSpace: colorSpace)
-                        ok = adaptor.append(dstBuffer, withPresentationTime: pts)
-                    }
-                    if !ok {
-                        reader.cancelReading()
-                        videoDone = true
-                        vInput.markAsFinished()
-                        group.leave()
-                        return
-                    }
-
-                    let p = min(1, max(0, (t - startSeconds) / totalSeconds))
-                    if p - lastReported >= 0.01 { lastReported = p; onProgress(p) }
-                }
-            }
-
-            if let aInput, let aOutput {
-                var audioDone = false
-                group.enter()
-                aInput.requestMediaDataWhenReady(on: audioQueue) { [self] in
-                    guard !audioDone else { return }
-                    while aInput.isReadyForMoreMediaData {
-                        if isCancelled || reader.status != .reading || writer.status != .writing {
-                            audioDone = true; aInput.markAsFinished(); group.leave(); return
-                        }
-                        guard let sample = aOutput.copyNextSampleBuffer() else {
-                            audioDone = true; aInput.markAsFinished(); group.leave(); return
-                        }
-                        if !aInput.append(sample) {
-                            audioDone = true; aInput.markAsFinished(); group.leave(); return
-                        }
-                    }
-                }
-            }
-
-            group.notify(queue: .global(qos: .userInitiated)) { [self] in
-                aiStage?.finish()
-                if isCancelled {
-                    reader.cancelReading()
-                    writer.cancelWriting()
-                    try? FileManager.default.removeItem(at: outputURL)
-                    cont.resume(throwing: NaiseError.cancelled)
-                    return
-                }
-                if reader.status == .failed {
-                    writer.cancelWriting()
-                    cont.resume(throwing: NaiseError.failed(reader.error?.localizedDescription ?? "Read failed"))
-                    return
-                }
-                if writer.status == .failed {
-                    cont.resume(throwing: NaiseError.failed(writer.error?.localizedDescription ?? "Write failed"))
-                    return
-                }
-                writer.finishWriting {
-                    if writer.status == .completed {
-                        onProgress(1)
-                        var done = plan
-                        done.usedAI = aiStage?.isActive ?? false
-                        cont.resume(returning: done)
-                    } else {
-                        cont.resume(throwing: NaiseError.failed(writer.error?.localizedDescription ?? "Finalize failed"))
-                    }
-                }
-            }
-        }
-    }
-}
-
-// MARK: - UI
 
 struct ContentView: View {
-    @Environment(\.colorScheme) private var colorScheme
-
-    private var isLightMode: Bool { colorScheme == .light }
-
-    @State private var selectedVideo: PhotosPickerItem?
-    @State private var videoURL: URL?
-    @State private var exportedURLs: [URL] = []
-    @State private var partLength = "30s"
-    @State private var sourceInfo: SourceClipInfo?
-    @State private var statusTitle = "Ready to import"
-    @State private var statusDetail = "Select a clean clip for Story / Reels"
-    @State private var currentStep: EnhanceStep = .importClip
-    @State private var renderProgress: Double = 0
-    @State private var logs: [StatusLogEntry] = [
-        StatusLogEntry(timeText: "NOW", message: "Naise+ Metal engine ready")
-    ]
-    @State private var isProcessing = false
-    @State private var exportError: String?
-    @State private var platform = "Instagram"
+    @Environment(\.colorScheme) private var scheme
+    @AppStorage("naiseServerURL") private var serverURL = ""
+    @AppStorage("naiseServerToken") private var serverToken = ""
+    @AppStorage("naiseLastJobID") private var lastJobID = ""
+    @AppStorage("naiseLastJobBase") private var lastJobBase = ""
+    @State private var selected: PhotosPickerItem?
+    @State private var inputURL: URL?
+    @State private var outputURL: URL?
+    @State private var clip = NaiseClipInfo()
+    @State private var platform = "WhatsApp"
     @State private var resolution = "1080p"
-    @State private var fps = "60 FPS"
-    @State private var savedToPhotos = false
-    @State private var isSavingToPhotos = false
-    @State private var upscale = false
-    @State private var useAI = false
-    @State private var detail = "Crisp"
-    @State private var shareItem: ShareItem?
-    @State private var activeTranscoder: NaiseTranscoder?
+    @State private var page = 0
+    @State private var processing = false
+    @State private var progress = 0
+    @State private var stage = "Ready"
+    @State private var failure: String?
+    @State private var settings = false
+    @State private var shareItem: NaiseShareItem?
+    @State private var savedPath: String?
+    @State private var player: AVPlayer?
+    @State private var activeTask: Task<Void, Never>?
+    @State private var noiseReduction = false
+    @State private var showInfo = false
 
-    private let darkBgTop = Color(red: 0.08, green: 0.14, blue: 0.24)
-    private let darkBgMid = Color(red: 0.05, green: 0.08, blue: 0.15)
-    private let darkBgBottom = Color(red: 0.04, green: 0.05, blue: 0.09)
-    private let darkMuted = Color(red: 0.58, green: 0.65, blue: 0.74)
-    private let lightBgTop = Color(red: 0.90, green: 0.95, blue: 0.99)
-    private let lightBgMid = Color(red: 0.95, green: 0.97, blue: 1.00)
-    private let lightBgBottom = Color(red: 0.92, green: 0.94, blue: 0.98)
-    private let lightPrimary = Color(red: 0.07, green: 0.11, blue: 0.18)
-    private let lightMuted = Color(red: 0.38, green: 0.45, blue: 0.56)
-    private let cyanAccent = Color(red: 0.22, green: 0.74, blue: 0.97)
-    private let cyanBright = Color(red: 0.49, green: 0.83, blue: 0.99)
-    private let cyanDeep = Color(red: 0.06, green: 0.48, blue: 0.76)
-    private let indigoAccent = Color(red: 0.51, green: 0.55, blue: 0.97)
-
-    private var primaryText: Color { isLightMode ? lightPrimary : .white }
-    private var mutedText: Color { isLightMode ? lightMuted : darkMuted }
-    private var activeAccent: Color { isLightMode ? cyanDeep : cyanBright }
-    private var glassBorder: Color { isLightMode ? Color.black.opacity(0.09) : Color.white.opacity(0.14) }
-    private var segmentWell: Color { isLightMode ? Color.white.opacity(0.55) : Color.black.opacity(0.28) }
-
-    private let platforms = ["Instagram", "TikTok", "WhatsApp", "Facebook"]
-    private let resolutions = ["1080p", "4K"]
-    private let rates = ["60 FPS"]
-    private let detailLevels = ["Natural", "Crisp", "Strong"]
-    private let partLengths = ["30s", "60s", "Off"]
-
-    private static let timeFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm:ss"
-        return f
-    }()
-
-    private var detailMultiplier: Double {
-        switch detail {
-        case "Natural": return 0.6
-        case "Strong": return 1.8
-        default: return 1.0
-        }
-    }
-
-    private var fpsDetail: String {
-        guard let info = sourceInfo else { return "Never above source fps" }
-        let src = Int(info.fps.rounded())
-        return src >= 60 ? "Source \(src) FPS" : "Source \(src) → target 60 FPS"
-    }
-
-    private var currentSettings: EnhanceSettings {
-        EnhanceSettings(
-            platform: platform,
-            resolution: resolution,
-            requestedFPS: 60,
-            upscale: upscale,
-            useAI: useAI,
-            detail: detailMultiplier
-        )
-    }
-
-    /// WhatsApp: potong klip panjang kepada bahagian (macam PureStatus). Platform lain: satu fail.
-    private var partSeconds: Double? {
-        guard platform == "WhatsApp" else { return nil }
-        switch partLength {
-        case "30s": return 30
-        case "60s": return 60
-        default: return nil
-        }
-    }
-
-    /// Preview output sebenar sebelum render
-    private var plannedSummary: String {
-        guard let info = sourceInfo else { return "\(resolution) · 60 FPS" }
-        return "Target \(resolution) · 60 FPS · Source \(Int(info.fps.rounded())) FPS"
-    }
-
-    private var detailText: String {
-        (videoURL != nil && !isProcessing && currentStep == .profile) ? plannedSummary : statusDetail
-    }
+    private var dark: Bool { scheme == .dark }
+    private var ink: Color { dark ? .white : Color(red: 0.09, green: 0.10, blue: 0.13) }
+    private var secondary: Color { ink.opacity(0.62) }
+    private var bg: Color { dark ? Color(red: 0.015, green: 0.015, blue: 0.02) : Color(red: 0.95, green: 0.96, blue: 0.98) }
+    private var card: Color { dark ? Color(white: 0.12) : .white }
+    private var line: Color { ink.opacity(dark ? 0.16 : 0.08) }
+    private let purple = Color(red: 0.57, green: 0.30, blue: 0.95)
+    private let blue = Color(red: 0.23, green: 0.36, blue: 0.98)
 
     var body: some View {
         GeometryReader { geometry in
-            ScrollView(showsIndicators: false) {
-                VStack(spacing: 7) {
-                    header
-                    importArea
-                    clearStatusCard
-                    settingsPanel
-                    if let exportError {
-                        Text(exportError)
-                            .font(.caption2)
-                            .foregroundStyle(.red)
-                            .lineLimit(2)
-                            .multilineTextAlignment(.center)
+            let compact = geometry.size.height < 690
+            VStack(spacing: 0) {
+                Group {
+                    switch page {
+                    case 1: enhance(compact: compact)
+                    case 2: result(compact: compact)
+                    default: home(compact: compact)
                     }
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, 4)
-                .padding(.bottom, 6)
-                .frame(maxWidth: 500)
-                .frame(width: geometry.size.width)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                VStack(spacing: 6) {
-                    exportButton
-                    if !exportedURLs.isEmpty {
-                        HStack(spacing: 8) {
-                            Button {
-                                Task { await saveToPhotos() }
-                            } label: {
-                                Label(savedToPhotos ? "Saved to Photos" : (isSavingToPhotos ? "Saving…" : "Save to Photos"),
-                                      systemImage: savedToPhotos ? "checkmark.circle.fill" : "photo.badge.plus")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 10)
-                                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-                                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(glassBorder, lineWidth: 1))
-                            }
-                            .disabled(savedToPhotos || isSavingToPhotos || isProcessing)
-                            .opacity(savedToPhotos ? 0.7 : 1)
-                            secondaryButton("Share / Files", icon: "square.and.arrow.up") {
-                                shareItem = ShareItem(urls: exportedURLs)
-                            }
-                        }
-                    }
-                }
-                .foregroundStyle(activeAccent)
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
-                .padding(.bottom, 5)
-                .frame(maxWidth: 500)
-                .frame(maxWidth: .infinity)
-                .background(.ultraThinMaterial)
-            }
-            .background {
-                ZStack {
-                    LinearGradient(
-                        colors: isLightMode
-                            ? [lightBgTop, lightBgMid, lightBgBottom]
-                            : [darkBgTop, darkBgMid, darkBgBottom],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                    Circle().fill(cyanAccent.opacity(isLightMode ? 0.22 : 0.16)).frame(width: 280, height: 280).blur(radius: 70).offset(x: -110, y: -260)
-                    Circle().fill(indigoAccent.opacity(isLightMode ? 0.16 : 0.14)).frame(width: 260, height: 260).blur(radius: 75).offset(x: 130, y: 180)
-                }
-                .ignoresSafeArea()
-            }
+            .padding(.horizontal, 14)
+            .padding(.top, compact ? 4 : 8)
+            .padding(.bottom, 6)
+            .background(bg.ignoresSafeArea())
         }
-        .foregroundStyle(primaryText)
-        .sheet(item: $shareItem) { item in
-            ActivityView(urls: item.urls)
-        }
+        .foregroundStyle(ink)
+        .onChange(of: selected) { _, next in Task { await importVideo(next) } }
+        .sheet(isPresented: $settings) { serverSettings }
+        .sheet(item: $shareItem) { NaiseShareSheet(url: $0.url) }
+        .alert("Naise+", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
+            Button("OK", role: .cancel) { failure = nil }
+        } message: { Text(failure ?? "") }
+        .alert("Video Details", isPresented: $showInfo) {
+            Button("OK", role: .cancel) {}
+        } message: { Text(clip.label) }
+        .task { await resumeJobIfNeeded() }
     }
 
-    private func secondaryButton(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Label(title, systemImage: icon)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(activeAccent)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 11)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 13))
-                .overlay(RoundedRectangle(cornerRadius: 13).stroke(cyanAccent.opacity(0.45), lineWidth: 1))
-        }
-        .buttonStyle(.plain)
+    private func glass<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        content()
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
+            .overlay(RoundedRectangle(cornerRadius: 18).stroke(line, lineWidth: 1))
     }
-
-    private var header: some View {
+    private func title(_ name: String) -> some View {
         HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Naise+")
-                    .font(.system(size: 24, weight: .bold, design: .rounded))
-                Text("AI Video Enhancer")
-                    .font(.system(size: 12))
-                    .foregroundStyle(mutedText)
-            }
-            Spacer()
-        }
-    }
-
-    private var importArea: some View {
-        PhotosPicker(selection: $selectedVideo, matching: .videos) {
-            VStack(spacing: 3) {
-                Image(systemName: videoURL == nil ? "plus" : "checkmark")
-                    .font(.system(size: 19, weight: .semibold))
-                    .foregroundStyle(activeAccent)
-                    .frame(width: 29, height: 29)
-                    .background(cyanAccent.opacity(0.18), in: Circle())
-                Text(videoURL == nil ? "Import Video" : "Change Video")
-                    .font(.system(size: 16, weight: .semibold))
-                Text(videoURL == nil ? "Select from Photos library" : (sourceInfo?.summary ?? "Tap to replace current clip"))
-                    .font(.system(size: 11)).foregroundStyle(mutedText)
-            }
-            .frame(maxWidth: .infinity)
-            .frame(height: 78)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
-            .overlay {
-                RoundedRectangle(cornerRadius: 20)
-                    .stroke(
-                        videoURL == nil
-                            ? (isLightMode ? Color.black.opacity(0.14) : Color.white.opacity(0.24))
-                            : cyanAccent.opacity(0.75),
-                        style: StrokeStyle(lineWidth: 1.4, dash: videoURL == nil ? [6, 5] : [])
-                    )
-            }
-        }
-        .disabled(isProcessing)
-        .onChange(of: selectedVideo) { _, item in
-            Task { await loadVideo(item) }
-        }
-    }
-
-    private var clearStatusCard: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(exportError != nil ? Color.red : (isProcessing || videoURL != nil ? activeAccent : mutedText))
-                    .frame(width: 7, height: 7)
-                Text(statusTitle)
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(exportError != nil ? Color.red : (videoURL == nil ? mutedText : activeAccent))
-                    .lineLimit(1)
-                Spacer()
-                Text(isProcessing ? "\(Int(renderProgress * 100))%" : "\(platform) · \(resolution) · \(fps)")
-                    .font(.system(size: 10, weight: .semibold, design: isProcessing ? .monospaced : .default))
-                    .foregroundStyle(isProcessing ? activeAccent : mutedText)
-                    .lineLimit(1)
-            }
-
-            HStack(spacing: 5) {
-                ForEach(EnhanceStep.allCases) { step in
-                    let idx = EnhanceStep.allCases.firstIndex(of: step) ?? 0
-                    let activeIdx = EnhanceStep.allCases.firstIndex(of: currentStep) ?? 0
-                    let done = idx <= activeIdx && (videoURL != nil || step == .importClip)
-                    VStack(spacing: 3) {
-                        Capsule()
-                            .fill(done ? activeAccent : glassBorder)
-                            .frame(height: 3)
-                        Text(step.rawValue.uppercased())
-                            .font(.system(size: 9, weight: .bold))
-                            .tracking(0.5)
-                            .foregroundStyle(done ? activeAccent : mutedText)
-                    }
-                }
-            }
-
-            if isProcessing {
-                GeometryReader { bar in
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(segmentWell).frame(height: 4)
-                        Capsule()
-                            .fill(LinearGradient(colors: [cyanAccent, indigoAccent], startPoint: .leading, endPoint: .trailing))
-                            .frame(width: max(8, bar.size.width * min(1, max(0, renderProgress))), height: 4)
-                    }
-                }
-                .frame(height: 4)
-            }
-
-            Text(detailText)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(mutedText)
-                .lineLimit(1)
-
-            VStack(alignment: .leading, spacing: 2) {
-                ForEach(logs.suffix(1)) { entry in
-                    HStack(spacing: 6) {
-                        Text(entry.timeText)
-                            .font(.system(size: 9, weight: .bold, design: .monospaced))
-                            .foregroundStyle(activeAccent)
-                        Text(entry.message)
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(mutedText)
-                            .lineLimit(1)
-                    }
-                }
-            }
-        }
-        .padding(.horizontal, 13)
-        .padding(.vertical, 7)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(glassBorder, lineWidth: 1))
-    }
-
-    private var settingsPanel: some View {
-        VStack(spacing: 6) {
-            sectionHeading("PLATFORM", detail: platform, highlight: true)
-            HStack(spacing: 6) {
-                ForEach(platforms, id: \.self) { name in
-                    let isSelected = platform == name
-                    Button {
-                        withAnimation(.snappy(duration: 0.2)) {
-                            platform = name
-                            appendLog("Target: \(name) Story/Reels")
-                        }
-                    } label: {
-                        SocialPlatformLogo(platform: name)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 30)
-                            .foregroundStyle(isSelected ? activeAccent : mutedText)
-                            .background(isSelected ? cyanAccent.opacity(0.2) : Color.clear)
-                            .clipShape(RoundedRectangle(cornerRadius: 9))
-                            .overlay(RoundedRectangle(cornerRadius: 9).stroke(isSelected ? cyanAccent.opacity(0.65) : Color.clear, lineWidth: 1))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(name)
-                }
-            }
-            .padding(3)
-            .background(segmentWell, in: RoundedRectangle(cornerRadius: 12))
-
-            Divider().overlay(glassBorder)
-            sectionHeading("RESOLUTION", detail: resolutionDetail)
-            choiceRow(resolutions, selection: $resolution, labelPrefix: "Res")
-
-            Divider().overlay(glassBorder)
-            HStack {
-                Text("FRAME RATE").font(.system(size: 10, weight: .semibold)).tracking(1.2).foregroundStyle(mutedText)
-                Spacer()
-                Label("60 FPS LOCKED", systemImage: "lock.fill")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(activeAccent)
-            }
-
-            // Detail, Upscale and AI Super Resolution intentionally omitted.
-            // Existing server handles encoding; no extra enhancement is requested.
-            if platform == "WhatsApp" {
-                Divider().overlay(glassBorder)
-                HStack {
-                    Text("SPLIT LONG CLIPS").font(.system(size: 10, weight: .semibold)).foregroundStyle(mutedText)
-                    Spacer()
-                    Picker("Split", selection: $partLength) {
-                        ForEach(partLengths, id: \.self) { length in Text(length).tag(length) }
-                    }
-                    .pickerStyle(.menu)
-                    .tint(activeAccent)
-                }
-            }
-        }
-        .padding(10)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
-        .overlay(RoundedRectangle(cornerRadius: 18).stroke(glassBorder, lineWidth: 1))
-        .disabled(isProcessing)
-    }
-
-    private var resolutionDetail: String {
-        switch resolution {
-        case "720p": return "HD"
-        case "1080p": return "Full HD"
-        default: return "Ultra HD"
-        }
-    }
-
-    private func sectionHeading(_ title: String, detail: String, highlight: Bool = false) -> some View {
-        HStack {
-            Text(title).font(.system(size: 10, weight: .semibold)).tracking(1.2).foregroundStyle(mutedText)
-            Spacer()
-            Text(detail).font(.system(size: 11, weight: .semibold)).foregroundStyle(highlight ? activeAccent : mutedText)
-        }
-    }
-
-    private func choiceRow(_ options: [String], selection: Binding<String>, labelPrefix: String) -> some View {
-        HStack(spacing: 5) {
-            ForEach(options, id: \.self) { option in
-                let isSelected = selection.wrappedValue == option
-                Button {
-                    withAnimation(.snappy(duration: 0.2)) {
-                        selection.wrappedValue = option
-                        appendLog("\(labelPrefix): \(option)")
-                    }
-                } label: {
-                    Text(option)
-                        .font(.system(size: 13, weight: .semibold))
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 30)
-                        .foregroundStyle(isSelected ? activeAccent : mutedText)
-                        .background(isSelected ? cyanAccent.opacity(0.2) : Color.clear)
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(isSelected ? cyanAccent.opacity(0.65) : Color.clear, lineWidth: 1))
-                }
+            if page > 0 {
+                Button { page = page == 2 ? 1 : 0 } label: { Image(systemName: "chevron.left").font(.headline).frame(width: 38, height: 38).background(card, in: Circle()) }
                 .buttonStyle(.plain)
             }
+            Spacer()
+            Text(name).font(.system(size: 18, weight: .bold))
+            Spacer()
+            Button { settings = true } label: { Image(systemName: "ellipsis").font(.headline).frame(width: 38, height: 38).background(card, in: Circle()) }
+                .buttonStyle(.plain)
         }
-        .padding(4)
-        .background(segmentWell, in: RoundedRectangle(cornerRadius: 13))
+        .frame(height: 44)
     }
-
-    private var exportButton: some View {
-        Button {
-            if isProcessing {
-                activeTranscoder?.cancel()
-            } else {
-                Task { await exportVideo() }
-            }
-        } label: {
-            HStack(spacing: 10) {
-                if isProcessing {
-                    ProgressView().tint(.white)
-                } else {
-                    Image(systemName: "sparkles").font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
+    private func buttonStyle(_ caption: String, icon: String, action: @escaping () -> Void, highlighted: Bool = false) -> some View {
+        Button(action: action) {
+            Label(caption, systemImage: icon)
+                .font(.system(size: 15, weight: .semibold))
+                .frame(maxWidth: .infinity).frame(height: 45)
+                .foregroundStyle(highlighted ? .white : ink)
+                .background {
+                    RoundedRectangle(cornerRadius: 15).fill(highlighted ? AnyShapeStyle(LinearGradient(colors: [purple, blue], startPoint: .leading, endPoint: .trailing)) : AnyShapeStyle(.ultraThinMaterial))
                 }
-                Text(isProcessing ? "Rendering… tap to cancel" : "Enhance & Export").foregroundStyle(.white)
+                .overlay(RoundedRectangle(cornerRadius: 15).stroke(line, lineWidth: 1))
+        }.buttonStyle(.plain)
+    }
+    private func tabs() -> some View {
+        HStack {
+            tab("house.fill", "Home", page: 0)
+            tab("sparkles", "Enhance", page: 1)
+            tab("play.rectangle", "Result", page: 2)
+            Button { settings = true } label: { VStack(spacing: 3) { Image(systemName: "gearshape"); Text("Settings") }.font(.system(size: 10)).frame(maxWidth: .infinity) }
+                .buttonStyle(.plain)
+        }
+        .padding(.vertical, 10)
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay(Capsule().stroke(line, lineWidth: 1))
+    }
+    private func tab(_ icon: String, _ name: String, page target: Int) -> some View {
+        Button { page = target } label: {
+            VStack(spacing: 3) { Image(systemName: icon).font(.system(size: 17)); Text(name).font(.system(size: 10)) }
+                .foregroundStyle(page == target ? (dark ? Color.white : Color.black) : secondary)
+                .frame(maxWidth: .infinity)
+        }.buttonStyle(.plain)
+    }
+    private func clipRow() -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "film.stack.fill").font(.title3).frame(width: 35, height: 35).background(ink.opacity(0.07), in: RoundedRectangle(cornerRadius: 9))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(inputURL?.lastPathComponent ?? "No video selected").lineLimit(1).font(.system(size: 13, weight: .semibold))
+                Text(inputURL == nil ? "Import to begin" : clip.label).font(.system(size: 10)).foregroundStyle(secondary).lineLimit(1)
             }
-            .font(.system(size: 15, weight: .bold))
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 11)
-            .background(LinearGradient(colors: [cyanAccent, indigoAccent], startPoint: .leading, endPoint: .trailing))
-            .clipShape(Capsule())
+            Spacer(minLength: 0)
+            Button { showInfo = true } label: { Image(systemName: "info.circle").frame(width: 30, height: 30) }
+                .disabled(inputURL == nil).buttonStyle(.plain)
+        }.padding(11)
+    }
+    private func gauge(_ value: Int, size: CGFloat) -> some View {
+        ZStack {
+            Circle().trim(from: 0.05, to: 0.45).rotationEffect(.degrees(90))
+                .stroke(ink.opacity(0.14), style: StrokeStyle(lineWidth: 9, lineCap: .round)).frame(width: size, height: size)
+            Circle().trim(from: 0.05, to: 0.05 + 0.4 * CGFloat(max(0, min(100, value))) / 100)
+                .rotationEffect(.degrees(90))
+                .stroke(dark ? Color.white : Color.gray, style: StrokeStyle(lineWidth: 9, lineCap: .round)).frame(width: size, height: size)
+            VStack(spacing: 2) {
+                Text(processing ? "Enhancing" : "Processing").font(.caption2).foregroundStyle(secondary)
+                Text("\(value)%").font(.system(size: 32, weight: .semibold, design: .rounded))
+                Text(stage).font(.system(size: 10)).foregroundStyle(secondary).lineLimit(1)
+            }.offset(y: 21)
+        }.frame(height: size * 0.62).frame(maxWidth: .infinity).clipped()
+    }
+    private func infoCell(_ icon: String, _ value: String, _ label: String) -> some View {
+        VStack(spacing: 4) {
+            Image(systemName: icon).font(.system(size: 14))
+            Text(value).font(.system(size: 12, weight: .bold)).lineLimit(1).minimumScaleFactor(0.8)
+            Text(label).font(.system(size: 9)).foregroundStyle(secondary)
+        }.frame(maxWidth: .infinity).padding(.vertical, 9)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+    }
+    private func home(compact: Bool) -> some View {
+        VStack(spacing: compact ? 8 : 11) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Naise+").font(.system(size: 23, weight: .bold))
+                    Text("AI Video Enhancer").font(.caption).foregroundStyle(secondary)
+                }
+                Spacer()
+                Button { settings = true } label: { Image(systemName: "gearshape").frame(width: 40, height: 40).background(.ultraThinMaterial, in: Circle()) }.buttonStyle(.plain)
+            }
+            HStack(spacing: 6) {
+                ForEach(["WhatsApp", "Instagram", "TikTok", "YouTube"], id: \.self) { p in
+                    Button { platform = p } label: {
+                        Text(p).font(.system(size: 11, weight: .medium)).lineLimit(1).minimumScaleFactor(0.8)
+                            .frame(maxWidth: .infinity).padding(.vertical, 9)
+                            .foregroundStyle(platform == p ? (dark ? Color.black : Color.white) : ink)
+                            .background(platform == p ? (dark ? Color.white : Color.gray) : card, in: Capsule())
+                    }.buttonStyle(.plain)
+                }
+            }
+            glass {
+                VStack(spacing: 6) {
+                    HStack { Image(systemName: "sparkles"); Text("AI Enhancer").font(.headline); Spacer(); Text("60 FPS").font(.caption).foregroundStyle(secondary) }
+                    clipRow()
+                    gauge(progress, size: compact ? 158 : 190)
+                    ProgressView(value: Double(progress), total: 100).tint(dark ? .white : .gray)
+                    HStack(spacing: 6) {
+                        infoCell("rectangle.expand.vertical", inputURL == nil ? "—" : resolution, "Output")
+                        infoCell("speedometer", "60 FPS", "Locked")
+                        infoCell("clock", inputURL == nil ? "—" : "\(Int(clip.duration))s", "Duration")
+                        Button { showInfo = true } label: { infoCell("scissors", "Details", "Video") }.buttonStyle(.plain)
+                    }
+                }.padding(compact ? 10 : 14)
+            }
+            HStack(spacing: 9) {
+                glass {
+                    HStack { Image(systemName: "sun.max"); Text("Preserve HDR").font(.caption2); Spacer() }.padding(13)
+                }
+                glass {
+                    Toggle("Noise Reduce", isOn: $noiseReduction).font(.caption2).padding(10)
+                        .disabled(true) // Pending backend support; never claim this works yet.
+                }
+            }
+            PhotosPicker(selection: $selected, matching: .videos) {
+                Label(inputURL == nil ? "Import Video" : "Replace Video", systemImage: "plus")
+                    .font(.system(size: 15, weight: .semibold)).frame(maxWidth: .infinity).frame(height: 46)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 15))
+                    .overlay(RoundedRectangle(cornerRadius: 15).stroke(line))
+            }.buttonStyle(.plain).disabled(processing)
+            buttonStyle("Open Enhance", icon: "sparkles", action: { page = 1 }, highlighted: true)
+                .disabled(inputURL == nil)
+            Spacer(minLength: 1)
+            tabs()
         }
-        .disabled(videoURL == nil)
-        .opacity(videoURL == nil ? 0.55 : 1)
     }
-
-    // MARK: Logic
-
-    private func appendLog(_ message: String) {
-        logs.append(StatusLogEntry(timeText: Self.timeFormatter.string(from: Date()), message: message))
-        if logs.count > 16 { logs.removeFirst(logs.count - 16) }
-    }
-
-    private func cleanupTempFile(_ url: URL?) {
-        guard let url else { return }
-        try? FileManager.default.removeItem(at: url)
-    }
-
-    private func cleanupExported() {
-        for url in exportedURLs { try? FileManager.default.removeItem(at: url) }
-        exportedURLs = []
-    }
-    @MainActor
-private func loadVideo(_ item: PhotosPickerItem?) async {
-    cleanupTempFile(videoURL)
-    cleanupExported()
-    savedToPhotos = false
-    isSavingToPhotos = false
-
-    videoURL = nil
-    sourceInfo = nil
-    exportError = nil
-    renderProgress = 0
-
-    guard let item else {
-        currentStep = .importClip
-        statusTitle = "Ready to import"
-        statusDetail = "Select a video from Photos"
-        return
-    }
-
-    currentStep = .importClip
-    statusTitle = "Importing clip"
-    statusDetail = "Loading video from Photos..."
-
-    do {
-        guard let picked = try await item.loadTransferable(
-            type: PickedVideo.self
-        ) else {
-            statusTitle = "Import failed"
-            statusDetail = "Unable to load video"
-            return
+    private func enhance(compact: Bool) -> some View {
+        VStack(spacing: compact ? 7 : 10) {
+            title("Enhance Video")
+            glass {
+                VStack(spacing: 9) {
+                    HStack { Text("Original"); Spacer(); Text(outputURL == nil ? "Preview" : "Enhanced") }.font(.caption).foregroundStyle(secondary)
+                    if let url = outputURL ?? inputURL {
+                        VideoPlayer(player: playerFor(url))
+                            .frame(height: compact ? 152 : 190)
+                            .clipShape(RoundedRectangle(cornerRadius: 13))
+                    } else {
+                        ZStack { Rectangle().fill(ink.opacity(0.05)); Label("Import a video first", systemImage: "play.rectangle").foregroundStyle(secondary) }
+                            .frame(height: compact ? 152 : 190).clipShape(RoundedRectangle(cornerRadius: 13))
+                    }
+                    HStack { Text(inputURL?.lastPathComponent ?? "No clip").lineLimit(1); Spacer(); Text(clip.label).lineLimit(1) }
+                        .font(.system(size: 10)).foregroundStyle(secondary)
+                }.padding(10)
+            }
+            glass {
+                VStack(spacing: compact ? 9 : 13) {
+                    HStack { Label("Adaptive Enhance", systemImage: "sparkles").font(.headline); Spacer(); Text("Auto").foregroundStyle(secondary) }
+                    gauge(progress, size: compact ? 128 : 155)
+                    HStack(spacing: 8) {
+                        ForEach(["1080p", "4K"], id: \.self) { option in
+                            Button { resolution = option } label: {
+                                Text(option).font(.system(size: 13, weight: .semibold)).frame(maxWidth: .infinity).padding(.vertical, 11)
+                                    .foregroundStyle(resolution == option ? (dark ? Color.black : Color.white) : ink)
+                                    .background(resolution == option ? (dark ? Color.white : Color.gray) : card, in: Capsule())
+                            }.buttonStyle(.plain).disabled(processing)
+                        }
+                        Text("60 FPS").font(.system(size: 13, weight: .bold)).padding(.horizontal, 13).padding(.vertical, 11)
+                            .background(card, in: Capsule())
+                    }
+                    HStack(spacing: 10) {
+                        Label("Natural color", systemImage: "camera.filters").font(.caption2)
+                        Spacer()
+                        Label("HDR if supported", systemImage: "sun.max").font(.caption2)
+                    }.foregroundStyle(secondary)
+                    if processing { ProgressView(value: Double(progress), total: 100); Text(stage).font(.caption2).foregroundStyle(secondary) }
+                }.padding(compact ? 10 : 13)
+            }
+            if processing {
+                buttonStyle("Stop checking on this device", icon: "pause.circle") {
+                    activeTask?.cancel(); activeTask = nil
+                    processing = false
+                    stage = "Job continues on PC; reopen to reconnect"
+                    // This stops polling only; backend has no cancel endpoint.
+                }
+            } else {
+                buttonStyle("Enhance & Export", icon: "sparkles", action: { beginProcessing() }, highlighted: true)
+                    .disabled(inputURL == nil || serverURL.isEmpty)
+            }
+            if serverURL.isEmpty { Text("Add your HTTPS tunnel URL in Settings first.").font(.caption2).foregroundStyle(secondary) }
+            Spacer(minLength: 1)
+            tabs()
         }
-
-        let url = picked.url
-        let asset = AVURLAsset(url: url)
-
-        guard let track = try await asset
-            .loadTracks(withMediaType: .video).first else {
-            cleanupTempFile(url)
-            throw NaiseError.noVideoTrack
-        }
-
-        let naturalSize = try await track.load(.naturalSize)
-        let transform = try await track.load(.preferredTransform)
-        let duration = try await asset.load(.duration)
-        let nominalFPS = try await track.load(.nominalFrameRate)
-
-        let rect = CGRect(
-            origin: .zero,
-            size: naturalSize
-        ).applying(transform)
-
-        sourceInfo = SourceClipInfo(
-            width: Int(abs(rect.width)),
-            height: Int(abs(rect.height)),
-            durationSeconds: max(0, CMTimeGetSeconds(duration)),
-            fps: nominalFPS > 0 ? Double(nominalFPS) : 30
-        )
-
-        videoURL = url
-        currentStep = .profile
-        statusTitle = "Source ready"
-        statusDetail = sourceInfo?.summary ?? "Video loaded"
-
-        appendLog("Video imported successfully")
-
-    } catch {
-        exportError = error.localizedDescription
-        statusTitle = "Import failed"
-        statusDetail = "Try another video"
-        appendLog("Import error")
     }
-}
-    /// Saiz fail terbesar (setiap bahagian), untuk semak had saiz WhatsApp
-    private func fileSizeText(_ urls: [URL]) -> String {
-        var largest: Int64 = 0
-        for url in urls {
-            if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-               let size = attrs[.size] as? NSNumber {
-                largest = max(largest, size.int64Value)
+    private func result(compact: Bool) -> some View {
+        VStack(spacing: compact ? 7 : 11) {
+            title("Result")
+            glass {
+                VStack(spacing: 6) {
+                    Image(systemName: outputURL == nil ? "clock" : "checkmark.circle").font(.system(size: 42)).padding(.top, 8)
+                    Text(outputURL == nil ? "No completed video yet" : "Video Ready").font(.system(size: 18, weight: .bold))
+                    Text(outputURL == nil ? "Enhance a video first." : "Preview, share or save the exported clip.")
+                        .font(.caption2).foregroundStyle(secondary).padding(.bottom, 8)
+                }.frame(maxWidth: .infinity).padding(12)
+            }
+            if let outputURL {
+                VideoPlayer(player: playerFor(outputURL))
+                    .frame(height: compact ? 165 : 210)
+                    .clipShape(RoundedRectangle(cornerRadius: 17))
+                HStack(spacing: 8) {
+                    infoCell("rectangle.expand.vertical", resolution, "Output")
+                    infoCell("gauge", "60 FPS", "Target")
+                    infoCell("checkmark.seal", "Ready", "Job")
+                }
+                glass { HStack { Image(systemName: "doc.fill"); Text(outputURL.lastPathComponent).lineLimit(1); Spacer() }.font(.caption).padding(12) }
+                buttonStyle("Share", icon: "square.and.arrow.up", action: { shareItem = NaiseShareItem(url: outputURL) }, highlighted: true)
+                buttonStyle(savedPath == outputURL.path ? "Saved to Photos ✓" : "Save to Photos", icon: "square.and.arrow.down") {
+                    Task { await saveToPhotos(outputURL) }
+                }.disabled(savedPath == outputURL.path)
+            } else {
+                buttonStyle("Go to Enhance", icon: "sparkles", action: { page = 1 }, highlighted: true)
+            }
+            Spacer(minLength: 1)
+            tabs()
+        }
+    }
+    // Player intentionally stays within app; recreate only when URL changes.
+    private func playerFor(_ url: URL) -> AVPlayer {
+        if let player, let current = (player.currentItem?.asset as? AVURLAsset)?.url, current == url { return player }
+        let created = AVPlayer(url: url)
+        DispatchQueue.main.async { self.player = created }
+        return created
+    }
+    private var serverSettings: some View {
+        NavigationStack {
+            Form {
+                Section("Private backend") {
+                    TextField("https://your-tunnel.trycloudflare.com", text: $serverURL)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+                    SecureField("X-API-Key (optional)", text: $serverToken)
+                    Text("Quick Tunnel addresses can change when restarted. Only use a server you control.").font(.caption)
+                }
+                Section("Processing") {
+                    Text("Output 60 FPS. RIFE/NVENC and HDR behavior depend on the Windows backend, not the UI.")
+                    if !lastJobID.isEmpty { Text("Last job: \(lastJobID)").font(.caption2).textSelection(.enabled) }
+                    Button("Reconnect to last job") { settings = false; Task { await resumeJobIfNeeded() } }
+                }
+            }.navigationTitle("Naise+ Settings").toolbar { Button("Done") { settings = false } }
+        }
+    }
+    @MainActor private func importVideo(_ item: PhotosPickerItem?) async {
+        guard let item else { return }
+        do {
+            let picked = try await item.loadTransferable(type: NaisePickedVideo.self)
+            guard let url = picked?.url else { throw NSError(domain: "Naise+", code: 3, userInfo: [NSLocalizedDescriptionKey: "Could not import clip"] ) }
+            let asset = AVURLAsset(url: url)
+            guard let track = try await asset.loadTracks(withMediaType: .video).first else { throw NSError(domain: "Naise+", code: 4, userInfo: [NSLocalizedDescriptionKey: "Video track missing"] ) }
+            let natural = try await track.load(.naturalSize)
+            let transform = try await track.load(.preferredTransform)
+            let rotated = CGRect(origin: .zero, size: natural).applying(transform)
+            let rate = try await track.load(.nominalFrameRate)
+            let duration = try await asset.load(.duration)
+            clip = NaiseClipInfo(width: Int(abs(rotated.width)), height: Int(abs(rotated.height)), fps: Double(rate), duration: max(0, CMTimeGetSeconds(duration)))
+            inputURL = url; outputURL = nil; savedPath = nil; player = nil; progress = 0; stage = "Ready"
+            page = 1
+        } catch { failure = error.localizedDescription }
+    }
+    private func beginProcessing() {
+        guard let inputURL, !processing else { return }
+        activeTask?.cancel()
+        processing = true; progress = 0; stage = "Uploading"; outputURL = nil; savedPath = nil
+        let base = serverURL; let token = serverToken; let selectedResolution = resolution
+        activeTask = Task {
+            do {
+                let job = try await NaiseAPI.upload(video: inputURL, resolution: selectedResolution, base: base, token: token)
+                await MainActor.run { lastJobID = job; lastJobBase = base }
+                try await poll(job: job, base: base, token: token)
+            } catch is CancellationError {
+                await MainActor.run { processing = false }
+            } catch {
+                await MainActor.run { failure = error.localizedDescription; processing = false; stage = "Failed" }
             }
         }
-        return largest > 0 ? String(format: "%.1f MB", Double(largest) / 1_048_576) : ""
     }
-
-    @MainActor
-private func exportVideo() async {
-    guard let videoURL else { return }
-
-    cleanupExported()
-    savedToPhotos = false
-    isSavingToPhotos = false
-    isProcessing = true
-    exportError = nil
-    renderProgress = 0
-    currentStep = .render
-    statusTitle = "Uploading & Processing"
-    statusDetail = "FFmpeg server is processing your video"
-    appendLog("Connecting to Naise+ server")
-
-    UIApplication.shared.isIdleTimerDisabled = true
-
-    defer {
-        isProcessing = false
-        UIApplication.shared.isIdleTimerDisabled = false
+    private func poll(job: String, base: String, token: String) async throws {
+        while !Task.isCancelled {
+            let status = try await NaiseAPI.status(job: job, base: base, token: token)
+            await MainActor.run { progress = status.progress; stage = status.stage ?? status.state }
+            if status.state == "ready" {
+                let url = try await NaiseAPI.download(job: job, base: base, token: token)
+                await MainActor.run { outputURL = url; player = nil; processing = false; progress = 100; stage = "Ready"; page = 2; lastJobID = ""; lastJobBase = "" }
+                return
+            }
+            if status.state == "failed" {
+                throw NSError(domain: "Naise+", code: 5, userInfo: [NSLocalizedDescriptionKey: status.error ?? "Server failed processing video"])
+            }
+            try await Task.sleep(for: .seconds(2))
+        }
     }
-
-    do {
-        let output = try await NaiseServerEngine.process(
-            videoURL: videoURL,
-            resolution: resolution,
-            fps: 60
-        )
-
-        exportedURLs = [output]
-        renderProgress = 1
-        currentStep = .ready
-        statusTitle = "Export ready"
-        statusDetail = "Server processed MP4 · \(fileSizeText([output]))"
-        appendLog("FFmpeg processing completed")
-    } catch {
-        exportError = error.localizedDescription
-        currentStep = .profile
-        statusTitle = "Export failed"
-        statusDetail = "Check server and Cloudflare connection"
-        appendLog("Server error: \(error.localizedDescription)")
+    @MainActor private func resumeJobIfNeeded() async {
+        guard !lastJobID.isEmpty, !lastJobBase.isEmpty, !processing else { return }
+        let job = lastJobID
+        let base = lastJobBase
+        let token = serverToken
+        processing = true; stage = "Reconnecting"; page = 1
+        do { try await poll(job: job, base: base, token: token) }
+        catch {
+            processing = false
+            failure = "Cannot reconnect: \(error.localizedDescription). Check that the same backend and tunnel are still running."
+        }
     }
-}
-
-    @MainActor
-    private func saveToPhotos() async {
-        guard !savedToPhotos && !isSavingToPhotos && !isProcessing else { return }
-        let urls = exportedURLs
-        guard !urls.isEmpty else { return }
-        isSavingToPhotos = true
-        defer { isSavingToPhotos = false }
-
+    @MainActor private func saveToPhotos(_ url: URL) async {
+        guard savedPath != url.path else { return }
         guard Bundle.main.object(forInfoDictionaryKey: "NSPhotoLibraryAddUsageDescription") != nil else {
-            exportError = "Photos permission description is missing from Info.plist."
+            failure = "Add NSPhotoLibraryAddUsageDescription to Info.plist or use Share to save manually."
             return
         }
-        let authorization = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-        guard authorization == .authorized || authorization == .limited else {
-            exportError = "Allow Photos access (Add Photos only) in Settings."
-            return
-        }
+        let auth = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        guard auth == .authorized || auth == .limited else { failure = "Allow Add Photos access or use Share."; return }
         do {
             try await PHPhotoLibrary.shared().performChanges {
-                for url in urls {
-                    _ = PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
-                }
+                _ = PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
             }
-            savedToPhotos = true
-            exportError = nil
-            statusTitle = "Video Saved Successfully ✓"
-            statusDetail = urls.count > 1 ? "\(urls.count) videos saved to Photos" : "Your video is in Photos"
-            appendLog("Video Saved Successfully")
-        } catch {
-            exportError = error.localizedDescription
-            appendLog("Save to Photos failed")
-        }
+            savedPath = url.path
+        } catch { failure = error.localizedDescription }
     }
 }
 
-// MARK: - Share sheet (fallback Save to Photos)
-
-private struct ShareItem: Identifiable {
-    let id = UUID()
-    let urls: [URL]
-}
-
-private struct ActivityView: UIViewControllerRepresentable {
-    let urls: [URL]
-
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: urls, applicationActivities: nil)
-    }
-
-    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
-}
-
-// MARK: - Platform logos
-
-private struct SocialPlatformLogo: View {
-    let platform: String
-    var body: some View {
-        switch platform {
-        case "Instagram":
-            ZStack {
-                RoundedRectangle(cornerRadius: 5.5).stroke(lineWidth: 1.8).frame(width: 19, height: 19)
-                Circle().stroke(lineWidth: 1.8).frame(width: 8.5, height: 8.5)
-                Circle().fill().frame(width: 2.3, height: 2.3).offset(x: 5.2, y: -5.2)
-            }
-        case "TikTok":
-            TikTokShape().fill().frame(width: 17, height: 19)
-        case "WhatsApp":
-            ZStack {
-                WhatsAppBubbleShape().stroke(style: StrokeStyle(lineWidth: 1.8, lineCap: .round, lineJoin: .round)).frame(width: 19, height: 19)
-                WhatsAppPhoneShape().fill().frame(width: 9.5, height: 9.5)
-            }
-        default:
-            FacebookFShape().fill().frame(width: 11, height: 19)
-        }
-    }
-}
-
-private struct TikTokShape: Shape {
-    func path(in rect: CGRect) -> Path {
-        let w = rect.width, h = rect.height
-        var p = Path()
-        p.move(to: CGPoint(x: w * 0.68, y: h * 0.05))
-        p.addLine(to: CGPoint(x: w * 0.50, y: h * 0.05))
-        p.addLine(to: CGPoint(x: w * 0.50, y: h * 0.67))
-        p.addCurve(to: CGPoint(x: w * 0.34, y: h * 0.80), control1: CGPoint(x: w * 0.50, y: h * 0.75), control2: CGPoint(x: w * 0.43, y: h * 0.80))
-        p.addCurve(to: CGPoint(x: w * 0.19, y: h * 0.66), control1: CGPoint(x: w * 0.25, y: h * 0.80), control2: CGPoint(x: w * 0.19, y: h * 0.74))
-        p.addCurve(to: CGPoint(x: w * 0.38, y: h * 0.52), control1: CGPoint(x: w * 0.19, y: h * 0.57), control2: CGPoint(x: w * 0.28, y: h * 0.50))
-        p.addLine(to: CGPoint(x: w * 0.38, y: h * 0.36))
-        p.addCurve(to: CGPoint(x: w * 0.03, y: h * 0.66), control1: CGPoint(x: w * 0.18, y: h * 0.34), control2: CGPoint(x: w * 0.03, y: h * 0.48))
-        p.addCurve(to: CGPoint(x: w * 0.35, y: h * 0.96), control1: CGPoint(x: w * 0.03, y: h * 0.83), control2: CGPoint(x: w * 0.18, y: h * 0.96))
-        p.addCurve(to: CGPoint(x: w * 0.67, y: h * 0.66), control1: CGPoint(x: w * 0.53, y: h * 0.96), control2: CGPoint(x: w * 0.67, y: h * 0.83))
-        p.addLine(to: CGPoint(x: w * 0.67, y: h * 0.35))
-        p.addCurve(to: CGPoint(x: w * 0.96, y: h * 0.43), control1: CGPoint(x: w * 0.76, y: h * 0.40), control2: CGPoint(x: w * 0.86, y: h * 0.43))
-        p.addLine(to: CGPoint(x: w * 0.96, y: h * 0.27))
-        p.addCurve(to: CGPoint(x: w * 0.68, y: h * 0.05), control1: CGPoint(x: w * 0.80, y: h * 0.26), control2: CGPoint(x: w * 0.69, y: h * 0.17))
-        p.closeSubpath()
-        return p
-    }
-}
-
-private struct WhatsAppBubbleShape: Shape {
-    func path(in rect: CGRect) -> Path {
-        let w = rect.width, h = rect.height
-        var p = Path()
-        p.move(to: CGPoint(x: w * 0.12, y: h * 0.90))
-        p.addLine(to: CGPoint(x: w * 0.21, y: h * 0.68))
-        p.addArc(center: CGPoint(x: w * 0.52, y: h * 0.48), radius: w * 0.44, startAngle: .degrees(145), endAngle: .degrees(115), clockwise: false)
-        p.closeSubpath()
-        return p
-    }
-}
-
-private struct WhatsAppPhoneShape: Shape {
-    func path(in rect: CGRect) -> Path {
-        let w = rect.width, h = rect.height
-        var p = Path()
-        p.move(to: CGPoint(x: w * 0.22, y: h * 0.10))
-        p.addQuadCurve(to: CGPoint(x: w * 0.42, y: h * 0.34), control: CGPoint(x: w * 0.42, y: h * 0.14))
-        p.addLine(to: CGPoint(x: w * 0.34, y: h * 0.44))
-        p.addQuadCurve(to: CGPoint(x: w * 0.60, y: h * 0.68), control: CGPoint(x: w * 0.42, y: h * 0.60))
-        p.addLine(to: CGPoint(x: w * 0.70, y: h * 0.60))
-        p.addQuadCurve(to: CGPoint(x: w * 0.92, y: h * 0.80), control: CGPoint(x: w * 0.88, y: h * 0.62))
-        p.addQuadCurve(to: CGPoint(x: w * 0.66, y: h * 0.94), control: CGPoint(x: w * 0.86, y: h * 0.96))
-        p.addQuadCurve(to: CGPoint(x: w * 0.08, y: h * 0.34), control: CGPoint(x: w * 0.26, y: h * 0.84))
-        p.addQuadCurve(to: CGPoint(x: w * 0.22, y: h * 0.10), control: CGPoint(x: w * 0.08, y: h * 0.14))
-        p.closeSubpath()
-        return p
-    }
-}
-
-private struct FacebookFShape: Shape {
-    func path(in rect: CGRect) -> Path {
-        let w = rect.width, h = rect.height
-        var p = Path()
-        p.move(to: CGPoint(x: w * 0.64, y: h * 0.98))
-        p.addLine(to: CGPoint(x: w * 0.64, y: h * 0.54))
-        p.addLine(to: CGPoint(x: w * 0.92, y: h * 0.54))
-        p.addLine(to: CGPoint(x: w * 0.97, y: h * 0.36))
-        p.addLine(to: CGPoint(x: w * 0.64, y: h * 0.36))
-        p.addLine(to: CGPoint(x: w * 0.64, y: h * 0.24))
-        p.addCurve(to: CGPoint(x: w * 0.82, y: h * 0.16), control1: CGPoint(x: w * 0.64, y: h * 0.19), control2: CGPoint(x: w * 0.68, y: h * 0.16))
-        p.addLine(to: CGPoint(x: w * 0.98, y: h * 0.16))
-        p.addLine(to: CGPoint(x: w * 0.98, y: h * 0.02))
-        p.addLine(to: CGPoint(x: w * 0.74, y: h * 0.02))
-        p.addCurve(to: CGPoint(x: w * 0.36, y: h * 0.24), control1: CGPoint(x: w * 0.49, y: h * 0.02), control2: CGPoint(x: w * 0.36, y: h * 0.11))
-        p.addLine(to: CGPoint(x: w * 0.36, y: h * 0.36))
-        p.addLine(to: CGPoint(x: w * 0.12, y: h * 0.36))
-        p.addLine(to: CGPoint(x: w * 0.12, y: h * 0.54))
-        p.addLine(to: CGPoint(x: w * 0.36, y: h * 0.54))
-        p.addLine(to: CGPoint(x: w * 0.36, y: h * 0.98))
-        p.closeSubpath()
-        return p
-    }
-}
-
-#Preview {
-    ContentView()
-}
+#Preview { ContentView() }
