@@ -238,11 +238,11 @@ struct ContentView: View {
     }
     private func gauge(_ value: Int, size: CGFloat) -> some View {
         ZStack {
-            Circle().trim(from: 0.05, to: 0.45).rotationEffect(.degrees(90))
-                .stroke(ink.opacity(0.14), style: StrokeStyle(lineWidth: 9, lineCap: .round)).frame(width: size, height: size)
+            Circle().trim(from: 0.05, to: 0.45)
+                .stroke(ink.opacity(0.14), style: StrokeStyle(lineWidth: 9, lineCap: .round)).frame(width: size, height: size).rotationEffect(.degrees(90))
             Circle().trim(from: 0.05, to: 0.05 + 0.4 * CGFloat(max(0, min(100, value))) / 100)
-                .rotationEffect(.degrees(90))
-                .stroke(dark ? Color.white : Color.gray, style: StrokeStyle(lineWidth: 9, lineCap: .round)).frame(width: size, height: size)
+                
+                .stroke(dark ? Color.white : Color.gray, style: StrokeStyle(lineWidth: 9, lineCap: .round)).frame(width: size, height: size).rotationEffect(.degrees(90))
             VStack(spacing: 2) {
                 Text(processing ? "Enhancing" : "Processing").font(.caption2).foregroundStyle(secondary)
                 Text("\(value)%").font(.system(size: 32, weight: .semibold, design: .rounded))
