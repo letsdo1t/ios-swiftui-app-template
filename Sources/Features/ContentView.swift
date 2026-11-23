@@ -140,6 +140,7 @@ struct ContentView: View {
     @State private var player: AVPlayer?
     @State private var activeTask: Task<Void, Never>?
     @State private var showInfo = false
+    @State private var showResultPlayer = false
     @State private var split: CGFloat = 0.5
     @State private var chartDrawn: CGFloat = 0
     @State private var badgePop = false
@@ -165,8 +166,11 @@ struct ContentView: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let w = geometry.size.width, h = geometry.size.height
-            let scale = min(w / 365.0, h / 690.0)
+            let w = geometry.size.width
+            let h = geometry.size.height
+            // Keep all three pages within the usable iPhone safe area.
+            // Scale down only when necessary; never expand content to fill extra height.
+            let scale = min(1.0, w / 365.0, h / 690.0)
             VStack(spacing: 0) {
                 Group {
                     switch page {
@@ -175,8 +179,9 @@ struct ContentView: View {
                     default: homeScreen
                     }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                if page != 0 { navigationBar }
+                .frame(maxWidth: .infinity, alignment: .top)
+                Spacer(minLength: 0)
+                navigationBar
             }
             .frame(width: w / scale, height: h / scale)
             .scaleEffect(scale, anchor: .topLeading)
@@ -188,6 +193,13 @@ struct ContentView: View {
         .onChange(of: selected) { _, next in Task { await importVideo(next) } }
         .sheet(isPresented: $settings) { serverSettings }
         .sheet(item: $shareItem) { NaiseShareSheet(url: $0.url) }
+        .sheet(isPresented: $showResultPlayer) {
+            if let url = outputURL {
+                VideoPlayer(player: playerFor(url))
+                    .background(Color.black)
+                    .presentationDetents([.large])
+            }
+        }
         .alert("Naise+", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK", role: .cancel) { failure = nil }
         } message: { Text(failure ?? "") }
@@ -361,7 +373,7 @@ struct ContentView: View {
 
     // MARK: Home
     private var homeScreen: some View {
-        VStack(alignment: .leading, spacing: 9) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 (Text("Naise").foregroundColor(ink) + Text("+").foregroundColor(accent))
                     .font(.system(size: 32, weight: .bold, design: .rounded))
@@ -397,9 +409,8 @@ struct ContentView: View {
                 }
             }
 
-            flexGap(8)
             surface(radius: 16) {
-                playerFrame(minHeight: 172, maxHeight: 250)
+                playerFrame(minHeight: 160, maxHeight: 206)
                     .padding(6)
             }
 
@@ -414,20 +425,16 @@ struct ContentView: View {
 
             surface(radius: 14) {
                 statTriple([
-                    ("timer", inputURL == nil ? "01:24" : mmss(clip.duration), "Duration"),
-                    ("arrow.up.left.and.arrow.down.right", inputURL == nil ? "1920 × 1080" : "\(clip.width) × \(clip.height)", "Resolution"),
-                    ("square.stack.3d.up", inputURL == nil ? "30 FPS" : "\(Int(clip.fps.rounded())) FPS", "Frame Rate")
+                    ("timer", inputURL == nil ? "—" : mmss(clip.duration), "Duration"),
+                    ("arrow.up.left.and.arrow.down.right", inputURL == nil ? "—" : "\(clip.width) × \(clip.height)", "Resolution"),
+                    ("square.stack.3d.up", inputURL == nil ? "—" : "\(Int(clip.fps.rounded())) FPS", "Frame Rate")
                 ])
             }
 
-            flexGap(6)
             PhotosPicker(selection: $selected, matching: .videos) {
                 gradientLabel("Import Video", symbol: "plus", gradient: blueGradient)
             }.buttonStyle(.plain).disabled(processing)
-            navigationBar
-                .padding(.horizontal, -14)
-                .padding(.top, 12)
-        }.padding(.horizontal, 14).padding(.bottom, 6)
+        }.padding(.horizontal, 14).padding(.top, 2).padding(.bottom, 8)
     }
 
     private func toolLabel(_ symbol: String, _ title: String) -> some View {
@@ -467,13 +474,12 @@ struct ContentView: View {
     }
 
     private var previewComparison: some View {
-        playerFrame(minHeight: 150, maxHeight: 230)
+        playerFrame(minHeight: 142, maxHeight: 188)
     }
 
     private var enhanceScreen: some View {
         VStack(spacing: 8) {
             header("Enhance")
-            flexGap(6)
             surface(radius: 16) { previewComparison.padding(6) }
             HStack(spacing: 6) {
                 Image(systemName: "sparkles").foregroundStyle(accent)
@@ -542,8 +548,7 @@ struct ContentView: View {
                     }
                 }
             }
-            flexGap(18)
-        }.padding(.horizontal, 14).padding(.bottom, 6)
+        }.padding(.horizontal, 14).padding(.top, 2).padding(.bottom, 8)
     }
 
     private var exportProgressButton: some View {
@@ -580,7 +585,6 @@ struct ContentView: View {
         let outDims = resolution == "4K" ? "(3840 × 2160)" : "(1920 × 1080)"
         return VStack(spacing: 8) {
             header("Result")
-            flexGap(6)
             surface(radius: 16) {
                 VStack(spacing: 5) {
                     ZStack {
@@ -629,15 +633,12 @@ struct ContentView: View {
                 resultTile("square.stack.3d.up", done ? "\(fps) FPS" : "—", "Frame Rate")
                 resultTile("externaldrive", outputURL.map { fileSizeText($0) } ?? "—", "File Size")
             }
-            if outputURL != nil {
-                surface(radius: 16) {
-                    playerFrame(minHeight: 150, maxHeight: 230, result: true)
-                        .padding(6)
-                }
-            }
-            surface(radius: 14) {
-                HStack(spacing: 10) {
-                    Image(systemName: outputURL == nil ? "film" : "play.rectangle.fill")
+            Button {
+                if outputURL != nil { showResultPlayer = true }
+            } label: {
+                surface(radius: 14) {
+                    HStack(spacing: 10) {
+                        Image(systemName: outputURL == nil ? "film" : "play.rectangle.fill")
                         .font(.system(size: 19))
                         .foregroundStyle(accent)
                         .frame(width: 52, height: 40)
@@ -649,8 +650,11 @@ struct ContentView: View {
                     }
                     Spacer(minLength: 0)
                     Image(systemName: "chevron.right").font(.system(size: 11)).foregroundStyle(secondary)
-                }.padding(9)
+                    }.padding(9)
+                }
             }
+            .buttonStyle(.plain)
+            .disabled(outputURL == nil)
             if let outputURL {
                 gradientButton("Share", symbol: "square.and.arrow.up", gradient: shareGradient) {
                     shareItem = NaiseShareItem(url: outputURL)
@@ -662,8 +666,7 @@ struct ContentView: View {
                 gradientButton("Go to Enhance", symbol: "sparkles", gradient: shareGradient) { page = 1 }
                 glassButton("Save to Photos", symbol: "square.and.arrow.down") {}.disabled(true).opacity(0.55)
             }
-            flexGap(18)
-        }.padding(.horizontal, 14).padding(.bottom, 6)
+        }.padding(.horizontal, 14).padding(.top, 2).padding(.bottom, 8)
     }
 
     private func resultTile(_ symbol: String, _ value: String, _ caption: String, highlight: Bool = false) -> some View {
