@@ -109,7 +109,7 @@ private enum NaiseAPI {
     }
 }
 
-// MARK: - Naise+ matched visual design (iOS 17+)
+// MARK: - Naise+ v9 visual refinement: locked Light/Dark poster references (iOS 17+)
 // Visual reference: compact 3-screen mockup. No fabricated quality metrics.
 struct ContentView: View {
     @Environment(\.colorScheme) private var scheme
@@ -140,11 +140,11 @@ struct ContentView: View {
     private var dark: Bool { scheme == .dark }
     private var ink: Color { dark ? .white : Color(red: 0.09, green: 0.12, blue: 0.20) }
     private var secondary: Color { dark ? Color(red: 0.69, green: 0.72, blue: 0.79) : Color(red: 0.42, green: 0.46, blue: 0.57) }
-    private var bg: Color { dark ? Color(red: 0.012, green: 0.014, blue: 0.027) : Color(red: 0.965, green: 0.970, blue: 0.986) }
+    private var bg: Color { dark ? Color(red: 0.010, green: 0.013, blue: 0.027) : Color(red: 0.965, green: 0.970, blue: 0.986) }
     private var borderColor: Color { dark ? .white.opacity(0.16) : .white.opacity(0.99) }
     private var purple: Color { Color(red: 0.67, green: 0.23, blue: 0.96) }
     private var blue: Color { Color(red: 0.11, green: 0.36, blue: 0.98) }
-    private var accent: Color { dark ? Color(red: 0.63, green: 0.50, blue: 1.0) : blue }
+    private var accent: Color { dark ? Color(red: 0.78, green: 0.78, blue: 0.88) : blue }
     private var actionGradient: LinearGradient {
         LinearGradient(colors: dark ? [purple, blue] : [Color(red: 0.17, green: 0.69, blue: 1), blue], startPoint: .leading, endPoint: .trailing)
     }
@@ -157,7 +157,7 @@ struct ContentView: View {
         GeometryReader { geometry in
             let safeHeight = geometry.size.height
             let safeWidth = geometry.size.width
-            let scale = min(1.0, safeWidth / 365.0, safeHeight / 695.0)
+            let scale = min(1.0, safeWidth / 365.0, safeHeight / 690.0)
             VStack(spacing: 0) {
                 Group {
                     switch page {
@@ -192,9 +192,9 @@ struct ContentView: View {
         ZStack {
             bg
             if dark {
-                RadialGradient(colors: [purple.opacity(0.23), .clear], center: .topTrailing,
+                RadialGradient(colors: [purple.opacity(0.11), .clear], center: .topTrailing,
                                startRadius: 0, endRadius: 370)
-                RadialGradient(colors: [blue.opacity(0.18), .clear], center: .bottomLeading,
+                RadialGradient(colors: [blue.opacity(0.10), .clear], center: .bottomLeading,
                                startRadius: 0, endRadius: 320)
             } else {
                 LinearGradient(colors: [.white, Color(red: 0.93, green: 0.95, blue: 0.99)],
@@ -211,16 +211,16 @@ struct ContentView: View {
                     .overlay {
                         RoundedRectangle(cornerRadius: radius, style: .continuous)
                             .fill(dark
-                                ? Color(red: 0.08, green: 0.09, blue: 0.14).opacity(0.82)
-                                : Color.white.opacity(0.70))
+                                ? Color(red: 0.10, green: 0.11, blue: 0.17).opacity(0.60)
+                                : Color.white.opacity(0.62))
                     }
                     .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
             }
             .overlay {
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .strokeBorder(dark ? .white.opacity(0.15) : .white.opacity(0.94), lineWidth: 0.8)
+                    .strokeBorder(dark ? .white.opacity(0.19) : .white.opacity(0.95), lineWidth: 0.8)
             }
-            .shadow(color: dark ? .black.opacity(0.18) : .gray.opacity(0.10), radius: 9, y: 3)
+            .shadow(color: dark ? .black.opacity(0.28) : .gray.opacity(0.13), radius: 12, y: 4)
     }
 
     private var primaryGradient: LinearGradient {
@@ -233,7 +233,7 @@ struct ContentView: View {
         Button(action: action) {
             Label(title, systemImage: symbol)
                 .font(.system(size: 13, weight: .semibold))
-                .frame(maxWidth: .infinity).frame(height: 42)
+                .frame(maxWidth: .infinity).frame(height: 39)
                 .foregroundStyle(prominent ? Color.white : ink)
                 .background {
                     RoundedRectangle(cornerRadius: 14).fill(
@@ -260,7 +260,7 @@ struct ContentView: View {
             Spacer()
             navCircle("ellipsis") { settings = true }
         }
-        .frame(height: 38)
+        .frame(height: 34)
     }
 
     private var navigationBar: some View {
@@ -269,7 +269,7 @@ struct ContentView: View {
             navItem("sparkles", "Enhance", 1)
             navItem("play.rectangle", "Result", 2)
         }
-        .padding(.vertical, 5)
+        .padding(.vertical, 3)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 17))
         .overlay { RoundedRectangle(cornerRadius: 17).strokeBorder(.white.opacity(dark ? 0.12 : 0.85)) }
         .padding(.horizontal, 13).padding(.bottom, 3)
@@ -281,8 +281,8 @@ struct ContentView: View {
                 Image(systemName: icon).font(.system(size: 17))
                 Text(label).font(.system(size: 10, weight: page == destination ? .semibold : .regular))
             }
-            .foregroundStyle(page == destination ? accent : secondary)
-            .frame(maxWidth: .infinity).frame(height: 38)
+            .foregroundStyle(page == destination ? (dark ? Color(red: 0.76, green: 0.57, blue: 1.0) : blue) : secondary)
+            .frame(maxWidth: .infinity).frame(height: 35)
         }.buttonStyle(.plain)
     }
 
@@ -351,7 +351,7 @@ struct ContentView: View {
                 Image(systemName: symbol).font(.system(size: 17))
                 Text(title).font(.system(size: 10, weight: .medium))
             }
-            .frame(maxWidth: .infinity).frame(height: 48)
+            .frame(maxWidth: .infinity).frame(height: 43)
         }
         .buttonStyle(.plain)
         .background { RoundedRectangle(cornerRadius: 12).fill(.thinMaterial) }
@@ -359,7 +359,7 @@ struct ContentView: View {
     }
 
     private var homeScreen: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 7) {
             HStack {
                 (Text("Naise").foregroundColor(ink) + Text("+").foregroundColor(accent))
                     .font(.system(size: 22, weight: .bold))
@@ -369,7 +369,7 @@ struct ContentView: View {
             }.frame(height: 38)
 
             Text("Enhance Your\nVideos with AI")
-                .font(.system(size: 22, weight: .bold))
+                .font(.system(size: 20, weight: .bold))
                 .lineSpacing(-2).fixedSize(horizontal: false, vertical: true)
             Text("Smooth motion, natural color, original audio.")
                 .font(.system(size: 10)).foregroundStyle(secondary)
@@ -377,9 +377,9 @@ struct ContentView: View {
             surface(radius: 17) {
                 VStack(spacing: 5) {
                     ZStack(alignment: .topLeading) {
-                        videoPreview(height: 206)
+                        videoPreview(height: 172)
                         if let inputURL {
-                            Text(inputURL.lastPathComponent)
+                            Text("My Video")
                                 .font(.system(size: 9))
                                 .lineLimit(1)
                                 .padding(.horizontal, 8).padding(.vertical, 4)
@@ -403,7 +403,7 @@ struct ContentView: View {
                     }.frame(maxWidth: .infinity).frame(height: 48)
                 }.buttonStyle(.plain).background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
                     .disabled(inputURL == nil || processing)
-                tool("scissors", "Trim") { failure = "Trim belum tersedia dalam versi ini." }
+                tool("scissors", "Trim") { failure = "Trim is not available yet; source video has not been changed." }
                     .disabled(inputURL == nil)
                 tool("info.circle", "Details") { showInfo = true }
                     .disabled(inputURL == nil)
@@ -419,7 +419,7 @@ struct ContentView: View {
                 Label(inputURL == nil ? "Import Video" : "Import Another Video", systemImage: "plus")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity).frame(height: 43)
+                    .frame(maxWidth: .infinity).frame(height: 40)
                     .background(primaryGradient, in: RoundedRectangle(cornerRadius: 13))
             }.buttonStyle(.plain).disabled(processing)
             if inputURL != nil {
@@ -440,7 +440,7 @@ struct ContentView: View {
             Spacer(minLength: 3)
             trailing()
         }
-        .padding(.horizontal, 10).frame(height: 46)
+        .padding(.horizontal, 10).frame(height: 40)
     }
 
     private func resolutionChip(_ title: String) -> some View {
@@ -477,10 +477,10 @@ struct ContentView: View {
                         split = min(max(gesture.location.x / max(1, g.size.width), 0.05), 0.95)
                     })
                 }
-                .frame(height: 188)
+                .frame(height: 172)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
             } else {
-                videoPreview(height: 188)
+                videoPreview(height: 172)
             }
             HStack {
                 Text("Original")
@@ -492,12 +492,12 @@ struct ContentView: View {
             .padding(.horizontal, 9).padding(.vertical, 5)
             .background(.black.opacity(0.30))
         }
-        .frame(height: 188)
+        .frame(height: 172)
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     private var enhanceScreen: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 7) {
             header("Enhance")
             surface(radius: 16) {
                 VStack(spacing: 5) {
@@ -576,7 +576,7 @@ struct ContentView: View {
     }
 
     private var resultScreen: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 7) {
             header("Result")
             surface(radius: 16) {
                 VStack(spacing: 6) {
@@ -598,25 +598,25 @@ struct ContentView: View {
                 VStack(spacing: 7) {
                     HStack {
                         Image(systemName: "chart.bar").foregroundStyle(accent)
-                        Text("Video Details").font(.system(size: 12, weight: .semibold))
+                        Text("Output Analysis").font(.system(size: 12, weight: .semibold))
                         Spacer()
                     }
                     detailTriple([
                         ("viewfinder", outputURL == nil ? "—" : resolution, "Resolution"),
-                        ("speedometer", outputURL == nil ? "—" : "60 FPS", "Output target"),
+                        ("speedometer", outputURL == nil ? "—" : "60 FPS", "Frame Rate"),
                         ("checkmark.seal", outputURL == nil ? "Pending" : "Ready", "Status")
                     ])
                 }.padding(10)
             }
             surface(radius: 15) {
                 VStack(spacing: 6) {
-                    videoPreview(height: 170, result: true)
+                    videoPreview(height: 122, result: true)
                     HStack {
                         Image(systemName: "film.stack").foregroundStyle(accent)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(outputURL?.lastPathComponent ?? "No enhanced video yet")
                                 .font(.system(size: 11, weight: .semibold)).lineLimit(1)
-                            Text(outputURL == nil ? "Process a clip to unlock Share and Save" : "Enhanced MP4 · Ready")
+                            Text(outputURL == nil ? "Process a clip to unlock Share and Save" : "Enhanced MP4 · Ready to share")
                                 .font(.system(size: 9)).foregroundStyle(secondary)
                         }
                         Spacer()
