@@ -3,6 +3,7 @@ import PhotosUI
 import Photos
 import AVKit
 import UniformTypeIdentifiers
+import Security
 
 // Naise+ v10 UI (iOS 17+). Uses the existing FastAPI job API:
 // POST /process -> 202 {job_id}; GET /jobs/{id}; GET /jobs/{id}/download.
@@ -48,16 +49,135 @@ private struct NaiseShareSheet: UIViewControllerRepresentable {
     func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
 
+
+private enum NaiseKeychain {
+    private static var query: [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Bundle.main.bundleIdentifier ?? "NaisePlus",
+            kSecAttrAccount as String: "naiseServerToken"
+        ]
+    }
+
+    static func read() -> String {
+        var request = query
+        request[kSecReturnData as String] = true
+        request[kSecMatchLimit as String] = kSecMatchLimitOne
+
+        var result: CFTypeRef?
+
+        guard SecItemCopyMatching(request as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data else {
+            return ""
+        }
+
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+
+    static func save(_ value: String) -> Bool {
+        if value.isEmpty {
+            let status = SecItemDelete(query as CFDictionary)
+            return status == errSecSuccess || status == errSecItemNotFound
+        }
+
+        let data = Data(value.utf8)
+
+        let attributes: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String:
+                kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        ]
+
+        let status = SecItemUpdate(
+            query as CFDictionary,
+            attributes as CFDictionary
+        )
+
+        if status == errSecSuccess {
+            return true
+        }
+
+        guard status == errSecItemNotFound else {
+            return false
+        }
+
+        var item = query
+        for (key, value) in attributes {
+            item[key] = value
+        }
+
+        return SecItemAdd(item as CFDictionary, nil) == errSecSuccess
+    }
+
+    static func loadAndMigrate() -> String {
+        let existing = read()
+
+        if !existing.isEmpty {
+            UserDefaults.standard.removeObject(forKey: "naiseServerToken")
+            return existing
+        }
+
+        let legacy = UserDefaults.standard.string(
+            forKey: "naiseServerToken"
+        ) ?? ""
+
+        if !legacy.isEmpty && save(legacy) {
+            UserDefaults.standard.removeObject(forKey: "naiseServerToken")
+        }
+
+        return legacy
+    }
+}
+
+private final class NaiseNetworkDelegate: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
+    }
+}
+
 private enum NaiseAPI {
+    private static let session: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 120
+        config.timeoutIntervalForResource = 600
+        config.urlCache = nil
+        config.httpCookieStorage = nil
+
+        return URLSession(
+            configuration: config,
+            delegate: NaiseNetworkDelegate(),
+            delegateQueue: nil
+        )
+    }()
+
     static func request(_ path: String, base: String, token: String, method: String = "GET") throws -> URLRequest {
         guard let url = URL(string: base.trimmingCharacters(in: .whitespacesAndNewlines)),
-              url.scheme == "https", url.host != nil else {
+              url.scheme == "https",
+              url.host != nil,
+              url.user == nil,
+              url.password == nil,
+              url.query == nil,
+              url.fragment == nil else {
             throw NSError(domain: "Naise+", code: 1, userInfo: [NSLocalizedDescriptionKey: "Set your current HTTPS tunnel URL in Settings."])
         }
         var req = URLRequest(url: url.appendingPathComponent(path))
         req.httpMethod = method
         req.timeoutInterval = 120
-        if !token.isEmpty { req.setValue(token, forHTTPHeaderField: "X-API-Key") }
+        let cleanToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanToken.isEmpty else {
+            throw NSError(
+                domain: "Naise+",
+                code: 401,
+                userInfo: [NSLocalizedDescriptionKey: "Enter your API key in Settings."]
+            )
+        }
+        req.setValue(cleanToken, forHTTPHeaderField: "X-API-Key")
         return req
     }
     static func validated(_ response: URLResponse, data: Data, expected: Int) throws {
@@ -92,20 +212,43 @@ private enum NaiseAPI {
         try output.synchronize()
         var req = try request("process", base: base, token: token, method: "POST")
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        let (data, response) = try await URLSession.shared.upload(for: req, fromFile: path)
+        let (data, response) = try await session.upload(for: req, fromFile: path)
         try validated(response, data: data, expected: 202)
         return try JSONDecoder().decode(NaiseJobCreated.self, from: data).job_id
     }
     static func status(job: String, base: String, token: String) async throws -> NaiseJobStatus {
-        let (data, response) = try await URLSession.shared.data(for: request("jobs/\(job)", base: base, token: token))
+        let (data, response) = try await session.data(for: request("jobs/\(job)", base: base, token: token))
         try validated(response, data: data, expected: 200)
         return try JSONDecoder().decode(NaiseJobStatus.self, from: data)
     }
     static func download(job: String, base: String, token: String) async throws -> URL {
-        let (data, response) = try await URLSession.shared.data(for: request("jobs/\(job)/download", base: base, token: token))
-        try validated(response, data: data, expected: 200)
-        let dest = FileManager.default.temporaryDirectory.appendingPathComponent("NaisePlus_\(UUID().uuidString).mp4")
-        try data.write(to: dest, options: .atomic)
+        let (tempURL, response) = try await session.download(
+            for: request("jobs/\(job)/download", base: base, token: token)
+        )
+
+        defer {
+            try? FileManager.default.removeItem(at: tempURL)
+        }
+
+        try validated(response, data: Data(), expected: 200)
+
+        let attributes = try FileManager.default.attributesOfItem(
+            atPath: tempURL.path
+        )
+
+        guard let size = attributes[.size] as? NSNumber,
+              size.int64Value > 0 else {
+            throw NSError(
+                domain: "Naise+",
+                code: 6,
+                userInfo: [NSLocalizedDescriptionKey: "Downloaded video is empty."]
+            )
+        }
+
+        let dest = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NaisePlus_\(UUID().uuidString).mp4")
+
+        try FileManager.default.moveItem(at: tempURL, to: dest)
         return dest
     }
 }
@@ -118,7 +261,7 @@ private enum NaiseAPI {
 struct ContentView: View {
     @Environment(\.colorScheme) private var scheme
     @AppStorage("naiseServerURL") private var serverURL = ""
-    @AppStorage("naiseServerToken") private var serverToken = ""
+    @State private var serverToken = ""
     @AppStorage("naiseLastJobID") private var lastJobID = ""
     @AppStorage("naiseLastJobBase") private var lastJobBase = ""
     @State private var selected: PhotosPickerItem?
@@ -206,7 +349,10 @@ struct ContentView: View {
         .alert("Video Details", isPresented: $showInfo) {
             Button("OK", role: .cancel) { }
         } message: { Text(clip.label) }
-        .task { await resumeJobIfNeeded() }
+        .task {
+            serverToken = NaiseKeychain.loadAndMigrate()
+            await resumeJobIfNeeded()
+        }
     }
 
     // MARK: Background: silver glass (light) / purple-blue glow (dark)
@@ -722,7 +868,9 @@ struct ContentView: View {
                 Section("Private backend") {
                     TextField("https://your-tunnel.trycloudflare.com", text: $serverURL)
                         .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
-                    SecureField("X-API-Key (optional)", text: $serverToken)
+                    SecureField("X-API-Key (required)", text: $serverToken)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
                     Text("Quick Tunnel addresses can change when restarted. Only use a server you control.").font(.caption)
                 }
                 Section("Processing") {
@@ -730,7 +878,20 @@ struct ContentView: View {
                     if !lastJobID.isEmpty { Text("Last job: \(lastJobID)").font(.caption2).textSelection(.enabled) }
                     Button("Reconnect to last job") { settings = false; Task { await resumeJobIfNeeded() } }
                 }
-            }.navigationTitle("Naise+ Settings").toolbar { Button("Done") { settings = false } }
+            }.navigationTitle("Naise+ Settings").toolbar {
+                Button("Done") {
+                    let token = serverToken.trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    )
+
+                    if NaiseKeychain.save(token) {
+                        serverToken = token
+                        settings = false
+                    } else {
+                        failure = "Could not save API key securely."
+                    }
+                }
+            }
         }
     }
     @MainActor private func importVideo(_ item: PhotosPickerItem?) async {
@@ -752,6 +913,13 @@ struct ContentView: View {
     }
     private func beginProcessing() {
         guard let inputURL, !processing else { return }
+
+        guard !serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            failure = "Enter your API key in Settings."
+            settings = true
+            return
+        }
+
         activeTask?.cancel()
         processing = true; progress = 0; stage = "Uploading"; outputURL = nil; savedPath = nil
         let base = serverURL; let token = serverToken; let selectedResolution = resolution; let selectedFPS = fps
