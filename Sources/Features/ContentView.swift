@@ -911,55 +911,407 @@ struct ContentView: View {
             page = 1
         } catch { failure = error.localizedDescription }
     }
+    @MainActor
     private func beginProcessing() {
+
         guard let inputURL, !processing else { return }
 
-        guard !serverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        guard lastJobID.isEmpty else {
+            failure = "An existing job is waiting. Reconnect from Settings first."
+            settings = true
+            return
+        }
+
+        let base = serverURL
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let token = serverToken
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !token.isEmpty else {
             failure = "Enter your API key in Settings."
             settings = true
             return
         }
 
-        activeTask?.cancel()
-        processing = true; progress = 0; stage = "Uploading"; outputURL = nil; savedPath = nil
-        let base = serverURL; let token = serverToken; let selectedResolution = resolution; let selectedFPS = fps
-        activeTask = Task {
-            do {
-                let job = try await NaiseAPI.upload(video: inputURL, resolution: selectedResolution, fps: selectedFPS, base: base, token: token)
-                await MainActor.run { lastJobID = job; lastJobBase = base }
-                try await poll(job: job, base: base, token: token)
-            } catch is CancellationError {
-                await MainActor.run { processing = false }
-            } catch {
-                await MainActor.run { failure = error.localizedDescription; processing = false; stage = "Failed" }
-            }
+        guard let endpoint = URL(string: base),
+              endpoint.scheme == "https",
+              endpoint.host != nil,
+              endpoint.user == nil,
+              endpoint.password == nil,
+              endpoint.query == nil,
+              endpoint.fragment == nil else {
+
+            failure = "Enter a valid HTTPS server URL."
+            settings = true
+            return
         }
-    }
-    private func poll(job: String, base: String, token: String) async throws {
-        while !Task.isCancelled {
-            let status = try await NaiseAPI.status(job: job, base: base, token: token)
-            await MainActor.run { progress = status.progress; stage = status.stage ?? status.state }
-            if status.state == "ready" {
-                let url = try await NaiseAPI.download(job: job, base: base, token: token)
-                await MainActor.run { outputURL = url; player = nil; processing = false; progress = 100; stage = "Ready"; page = 2; lastJobID = ""; lastJobBase = "" }
+
+        guard ["1080p", "4K"].contains(resolution) else {
+            failure = "Select Full HD or 4K."
+            return
+        }
+
+        guard clip.duration.isFinite,
+              clip.duration > 0,
+              clip.duration <= 60 else {
+
+            failure = "Select a video up to 60 seconds long."
+            return
+        }
+
+        do {
+
+            let attributes = try FileManager.default
+                .attributesOfItem(atPath: inputURL.path)
+
+            guard let size = attributes[.size] as? NSNumber,
+                  size.int64Value > 0,
+                  size.int64Value <= 60 * 1024 * 1024 else {
+
+                failure = "Video exceeds the 60 MiB upload limit or is empty."
                 return
             }
-            if status.state == "failed" {
-                throw NSError(domain: "Naise+", code: 5, userInfo: [NSLocalizedDescriptionKey: status.error ?? "Server failed processing video"])
+
+        } catch {
+
+            failure = "Cannot access the selected video."
+            return
+        }
+
+        activeTask?.cancel()
+
+        processing = true
+        progress = 0
+        stage = "Uploading"
+        outputURL = nil
+        savedPath = nil
+        player = nil
+
+        let selectedResolution = resolution
+
+        activeTask = Task { @MainActor in
+
+            defer {
+                processing = false
             }
-            try await Task.sleep(for: .seconds(2))
+
+            var uploadCompleted = false
+
+            do {
+
+                let job = try await NaiseAPI.upload(
+                    video: inputURL,
+                    resolution: selectedResolution,
+                    fps: 60,
+                    base: base,
+                    token: token
+                )
+
+                lastJobID = job
+                lastJobBase = base
+
+                uploadCompleted = true
+
+                try await poll(
+                    job: job,
+                    base: base,
+                    token: token
+                )
+
+            } catch is CancellationError {
+
+                stage = "Interrupted"
+
+            } catch {
+
+                if Task.isCancelled {
+
+                    stage = "Interrupted"
+
+                } else if !uploadCompleted {
+
+                    stage = "Failed"
+
+                    failure = "Upload could not be confirmed: \(error.localizedDescription). The server may already have received the video."
+
+                } else if lastJobID.isEmpty {
+
+                    stage = "Failed"
+                    failure = error.localizedDescription
+
+                } else {
+
+                    stage = "Interrupted"
+
+                    failure = "\(error.localizedDescription). Reconnect to the existing job from Settings."
+                }
+            }
         }
     }
-    @MainActor private func resumeJobIfNeeded() async {
-        guard !lastJobID.isEmpty, !lastJobBase.isEmpty, !processing else { return }
+
+    private func isRetryableNetworkError(
+        _ error: Error
+    ) -> Bool {
+
+        if let networkError = error as? URLError {
+
+            switch networkError.code {
+
+            case .timedOut,
+                 .networkConnectionLost,
+                 .notConnectedToInternet,
+                 .cannotConnectToHost,
+                 .cannotFindHost,
+                 .dnsLookupFailed:
+
+                return true
+
+            default:
+
+                return false
+            }
+        }
+
+        let nsError = error as NSError
+
+        return nsError.domain == "Naise+" &&
+            [408, 429, 500, 502, 503, 504,
+             520, 521, 522, 523, 524]
+            .contains(nsError.code)
+    }
+
+    @MainActor
+    private func poll(
+        job: String,
+        base: String,
+        token: String
+    ) async throws {
+
+        let clock = ContinuousClock()
+
+        let deadline = clock.now.advanced(
+            by: .seconds(5400)
+        )
+
+        var retries = 0
+
+        while true {
+
+            try Task.checkCancellation()
+
+            guard clock.now < deadline else {
+
+                throw NSError(
+                    domain: "Naise+",
+                    code: 408,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "Polling limit reached. The server job may still be running."
+                    ]
+                )
+            }
+
+            do {
+
+                let status = try await NaiseAPI.status(
+                    job: job,
+                    base: base,
+                    token: token
+                )
+
+                try Task.checkCancellation()
+
+                progress = max(
+                    progress,
+                    min(99, max(0, status.progress))
+                )
+
+                switch status.state {
+
+                case "queued":
+
+                    stage = "Queued"
+
+                case "processing":
+
+                    stage = status.stage ?? "Processing"
+
+                case "ready":
+
+                    stage = "Downloading"
+
+                    let url = try await NaiseAPI.download(
+                        job: job,
+                        base: base,
+                        token: token
+                    )
+
+                    if Task.isCancelled {
+
+                        try? FileManager.default.removeItem(
+                            at: url
+                        )
+
+                        throw CancellationError()
+                    }
+
+                    outputURL = url
+                    player = nil
+                    progress = 100
+                    stage = "Ready"
+                    page = 2
+
+                    lastJobID = ""
+                    lastJobBase = ""
+
+                    return
+
+                case "failed":
+
+                    lastJobID = ""
+                    lastJobBase = ""
+
+                    stage = "Failed"
+
+                    throw NSError(
+                        domain: "Naise+",
+                        code: 5,
+                        userInfo: [
+                            NSLocalizedDescriptionKey:
+                                status.error ??
+                                "Server failed processing video."
+                        ]
+                    )
+
+                default:
+
+                    throw NSError(
+                        domain: "Naise+",
+                        code: 6,
+                        userInfo: [
+                            NSLocalizedDescriptionKey:
+                                "Unexpected server job state."
+                        ]
+                    )
+                }
+
+                retries = 0
+
+            } catch {
+
+                try Task.checkCancellation()
+
+                let nsError = error as NSError
+
+                if nsError.domain == "Naise+" &&
+                    [404, 410].contains(nsError.code) {
+
+                    lastJobID = ""
+                    lastJobBase = ""
+
+                    throw NSError(
+                        domain: "Naise+",
+                        code: nsError.code,
+                        userInfo: [
+                            NSLocalizedDescriptionKey:
+                                "Job expired or no longer exists."
+                        ]
+                    )
+                }
+
+                guard isRetryableNetworkError(error),
+                      retries < 5 else {
+
+                    throw error
+                }
+
+                retries += 1
+
+                let delay = min(
+                    30,
+                    2 * (1 << (retries - 1))
+                )
+
+                stage = "Reconnecting (\(retries)/5)"
+
+                try await Task.sleep(
+                    for: .seconds(delay)
+                )
+
+                continue
+            }
+
+            try await Task.sleep(
+                for: .seconds(2)
+            )
+        }
+    }
+
+    @MainActor
+    private func resumeJobIfNeeded() async {
+
+        guard !lastJobID.isEmpty,
+              !lastJobBase.isEmpty,
+              !processing else {
+
+            return
+        }
+
         let job = lastJobID
+
         let base = lastJobBase
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let currentBase = serverURL
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
         let token = serverToken
-        processing = true; stage = "Reconnecting"; page = 1
-        do { try await poll(job: job, base: base, token: token) }
-        catch {
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard base == currentBase else {
+
+            failure = "The saved job belongs to a different server URL. Restore the original server URL before reconnecting."
+
+            return
+        }
+
+        guard !token.isEmpty else {
+
+            failure = "Enter your API key before reconnecting."
+
+            return
+        }
+
+        processing = true
+        stage = "Reconnecting"
+        page = 1
+
+        defer {
             processing = false
-            failure = "Cannot reconnect: \(error.localizedDescription). Check that the same backend and tunnel are still running."
+        }
+
+        do {
+
+            try await poll(
+                job: job,
+                base: base,
+                token: token
+            )
+
+        } catch is CancellationError {
+
+            stage = "Interrupted"
+
+        } catch {
+
+            stage = Task.isCancelled
+                ? "Interrupted"
+                : (lastJobID.isEmpty ? "Failed" : "Interrupted")
+
+            if !Task.isCancelled {
+                failure = error.localizedDescription
+            }
         }
     }
     @MainActor private func saveToPhotos(_ url: URL) async {
