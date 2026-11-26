@@ -280,6 +280,7 @@ struct ContentView: View {
     @State private var settings = false
     @State private var shareItem: NaiseShareItem?
     @State private var savedPath: String?
+    @State private var isSavingToPhotos = false
     @State private var player: AVPlayer?
     @State private var activeTask: Task<Void, Never>?
     @State private var showInfo = false
@@ -805,9 +806,9 @@ struct ContentView: View {
                 gradientButton("Share", symbol: "square.and.arrow.up", gradient: shareGradient) {
                     shareItem = NaiseShareItem(url: outputURL)
                 }
-                glassButton(saved ? "Saved to Photos ✓" : "Save to Photos", symbol: "square.and.arrow.down") {
+                glassButton(isSavingToPhotos ? "Saving..." : saved ? "Saved to Photos ✓" : "Save to Photos", symbol: "square.and.arrow.down") {
                     Task { await saveToPhotos(outputURL) }
-                }.disabled(saved)
+                }.disabled(saved || isSavingToPhotos)
             } else {
                 gradientButton("Go to Enhance", symbol: "sparkles", gradient: shareGradient) { page = 1 }
                 glassButton("Save to Photos", symbol: "square.and.arrow.down") {}.disabled(true).opacity(0.55)
@@ -895,6 +896,7 @@ struct ContentView: View {
         }
     }
     @MainActor private func importVideo(_ item: PhotosPickerItem?) async {
+        guard !isSavingToPhotos, !processing else { return }
         guard let item else { return }
         do {
             let picked = try await item.loadTransferable(type: NaisePickedVideo.self)
@@ -914,7 +916,7 @@ struct ContentView: View {
     @MainActor
     private func beginProcessing() {
 
-        guard let inputURL, !processing else { return }
+        guard let inputURL, !processing, !isSavingToPhotos else { return }
 
         guard lastJobID.isEmpty else {
             failure = "An existing job is waiting. Reconnect from Settings first."
@@ -1314,20 +1316,135 @@ struct ContentView: View {
             }
         }
     }
-    @MainActor private func saveToPhotos(_ url: URL) async {
-        guard savedPath != url.path else { return }
-        guard Bundle.main.object(forInfoDictionaryKey: "NSPhotoLibraryAddUsageDescription") != nil else {
-            failure = "Add NSPhotoLibraryAddUsageDescription to Info.plist or use Share to save manually."
+    @MainActor
+    private func saveToPhotos(_ url: URL) async {
+
+        guard !isSavingToPhotos else {
             return
         }
-        let auth = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-        guard auth == .authorized || auth == .limited else { failure = "Allow Add Photos access or use Share."; return }
+
+        guard savedPath != url.path else {
+            return
+        }
+
+        guard outputURL == url else {
+            return
+        }
+
+        guard url.isFileURL else {
+            failure = "The enhanced video is not a local file."
+            return
+        }
+
+        guard FileManager.default.fileExists(
+            atPath: url.path
+        ) else {
+
+            failure = "Enhanced video file not found."
+            return
+        }
+
+        isSavingToPhotos = true
+
+        defer {
+            isSavingToPhotos = false
+        }
+
         do {
-            try await PHPhotoLibrary.shared().performChanges {
-                _ = PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
+
+            let attributes = try FileManager.default
+                .attributesOfItem(atPath: url.path)
+
+            guard let size = attributes[.size] as? NSNumber,
+                  size.int64Value > 0 else {
+
+                failure = "The enhanced video file is empty."
+                return
             }
-            savedPath = url.path
-        } catch { failure = error.localizedDescription }
+
+            let asset = AVURLAsset(url: url)
+
+            let tracks = try await asset.loadTracks(
+                withMediaType: .video
+            )
+
+            guard !tracks.isEmpty else {
+
+                failure = "No valid video track was found."
+                return
+            }
+
+            let duration = try await asset.load(.duration)
+
+            let seconds = CMTimeGetSeconds(duration)
+
+            guard seconds.isFinite, seconds > 0 else {
+
+                failure = "The enhanced video has an invalid duration."
+                return
+            }
+
+            guard let usageDescription = Bundle.main
+                .object(
+                    forInfoDictionaryKey:
+                        "NSPhotoLibraryAddUsageDescription"
+                ) as? String,
+                !usageDescription.isEmpty else {
+
+                failure = "Photos permission is not configured. Use Share to save manually."
+                return
+            }
+
+            var auth = PHPhotoLibrary.authorizationStatus(
+                for: .addOnly
+            )
+
+            if auth == .notDetermined {
+
+                auth = await PHPhotoLibrary
+                    .requestAuthorization(for: .addOnly)
+            }
+
+            guard auth == .authorized ||
+                  auth == .limited else {
+
+                failure = "Allow Photos access in iPhone Settings, or use Share."
+                return
+            }
+
+            guard outputURL == url else {
+                return
+            }
+
+            try Task.checkCancellation()
+
+            try await PHPhotoLibrary.shared().performChanges {
+
+                let request = PHAssetCreationRequest.forAsset()
+
+                let options = PHAssetResourceCreationOptions()
+
+                options.shouldMoveFile = false
+
+                request.addResource(
+                    with: .video,
+                    fileURL: url,
+                    options: options
+                )
+            }
+
+            if outputURL == url {
+                savedPath = url.path
+            }
+
+        } catch is CancellationError {
+
+            return
+
+        } catch {
+
+            failure = "Could not save video: \(error.localizedDescription)"
+        }
     }
 }
 
